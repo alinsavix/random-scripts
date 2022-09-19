@@ -95,19 +95,24 @@ class Fields(IntEnum):
 
 
 # Can't quiiiiite type the multi-dimensional numpy array correctly, alas
-def gen_loudness(file: Path) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
+def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
     # Create python lists now, then convert to a numpy array at the end, for
     # much better performance.
     li: List[List[float]] = []
 
-    proc = subprocess.Popen(
-        ["ffmpeg", "-i", str(file), "-af", "ebur128=peak=true", "-f", "null", "-"],
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            ["ffmpeg", "-i", str(file), "-af", "ebur128=peak=true", "-f", "null", "-"],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+        )
+    except FileNotFoundError:
+        print("ERROR: Unable to execute ffmpeg, verify it exists in your PATH", file=sys.stderr)
+        sys.exit(1)
+
     assert proc.stdout is not None
 
     # read and parse the results, a line at a time
@@ -117,6 +122,9 @@ def gen_loudness(file: Path) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
 
         if not line:
             break
+
+        if args.debug:
+            print(f"DEBUG: ffmpeg: {line}", end="", file=sys.stderr)
 
         # if we hit the summary block, we're mostly done, so bail
         if " Summary:" in line:
@@ -160,6 +168,9 @@ def gen_loudness(file: Path) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
         if not line:
             break
 
+        if args.debug:
+            print(f"DEBUG: ffmpeg: {line}", end="", file=sys.stderr)
+
         m = re_ffmpeg_summary.match(line)
         if not m:
             # print(f"DEBUG: SKIPPING LINE: {line}")
@@ -167,6 +178,11 @@ def gen_loudness(file: Path) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
 
         summary[m.group("field")] = float(m.group("value"))
 
+    proc.wait(timeout=5)
+    if proc.returncode != 0:
+        print(
+            f"\nERROR: ffmpeg returned error code {proc.returncode}, can't continue", file=sys.stderr)
+        sys.exit(1)
 
     # We've gathered all the data, put it in a useful form
     lind: npt.NDArray[Any] = np.array(li)  # type: ignore
@@ -175,7 +191,7 @@ def gen_loudness(file: Path) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
 
 
 # Most of the matplotlib stuff have shitty typing support :(
-def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], args: argparse.Namespace):
+def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], args: argparse.Namespace) -> None:
     T = lind[:, Fields.TIME]
     momentary = lind[:, Fields.MOMENTARY]
     short = lind[:, Fields.SHORT]
@@ -284,13 +300,12 @@ def parse_arguments(argv: List[str]):
         allow_abbrev=True,
     )
 
-    # parser.add_argument(
-    #     "--debug",
-    #     action='store_const',
-    #     const=True,
-    #     default=False,
-    #     # help="Enable debugging",
-    # )
+    parser.add_argument(
+        "--debug",
+        action='store_true',
+        default=False,
+        help="Enable debugging output",
+    )
 
     parser.add_argument(
         "-o",
@@ -373,9 +388,6 @@ def parse_arguments(argv: List[str]):
 
     parsed_args = parser.parse_args(argv)
 
-    if parsed_args.write_graph and parsed_args.outfile is None:
-        parsed_args.outfile = parsed_args.file.with_suffix(".loudness.png")
-
     # make sure we enable writing the graph if the user specifies a filename
     if parsed_args.outfile:
         parsed_args.write_graph = True
@@ -383,6 +395,8 @@ def parse_arguments(argv: List[str]):
     if not parsed_args.interactive:
         parsed_args.write_graph = True
 
+    if parsed_args.write_graph and parsed_args.outfile is None:
+        parsed_args.outfile = parsed_args.file.with_suffix(".loudness.png")
     return parsed_args
 
 
@@ -396,7 +410,7 @@ def main(argv: List[str]) -> int:
 
     # log = lg.getLogger()
 
-    lind, summary = gen_loudness(args.file)
+    lind, summary = gen_loudness(args.file, args)
     gen_graph(lind, summary, args)
 
     return 0
