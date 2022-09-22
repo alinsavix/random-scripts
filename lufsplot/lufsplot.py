@@ -94,6 +94,22 @@ class Fields(IntEnum):
     TPK = 7
 
 
+# Convert seconds to [HH:]MM:SS
+def sec_to_hms(secs: float) -> str:
+    hours = int(secs // (60 * 60))
+    secs %= (60 * 60)
+
+    minutes = int(secs // 60)
+    secs %= 60
+
+    secs = int(secs)
+
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    else:
+        return f"{minutes:d}:{secs:02d}"
+
+
 # Can't quiiiiite type the multi-dimensional numpy array correctly, alas
 def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
     # Create python lists now, then convert to a numpy array at the end, for
@@ -191,7 +207,7 @@ def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any]
 
 
 # Most of the matplotlib stuff have shitty typing support :(
-def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], args: argparse.Namespace) -> None:
+def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, args: argparse.Namespace) -> None:
     T = lind[:, Fields.TIME]
     momentary = lind[:, Fields.MOMENTARY]
     short = lind[:, Fields.SHORT]
@@ -199,11 +215,21 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], args: argparse.
     lra = lind[:, Fields.LRA]
     ftpk = lind[:, Fields.FTPK]
 
-    _, ax1 = plt.subplots(figsize=(19.20, 10.80), dpi=72,
-                          linewidth=0.1, tight_layout=True)
+    if args.lra:
+        numrows = 2
+        gridspec = {'height_ratios': [5, 1]}
+    else:
+        numrows = 1
+        gridspec = {}
 
-    ax1.set_xlabel("seconds")
+    _, axs = plt.subplots(numrows, 1, sharex=True, gridspec_kw=gridspec, squeeze=False,
+                          figsize=(19.20, 10.80), dpi=72, linewidth=0.1, tight_layout=True)
+    plt.suptitle(title, size=16.0)
+
+    ax1 = axs[0][0]
+    # ax1.set_xlabel("seconds")
     ax1.set_xticks(list(range(0, int(np.max(T)), 30)))
+    ax1.set_xticklabels([sec_to_hms(x) for x in ax1.get_xticks()])
 
     ax1.set_ylim(ymin=-60, ymax=6)
     ax1.set_ylabel("Loudness (LUFS)")
@@ -243,12 +269,23 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], args: argparse.
         ax1.annotate(str(summary["I"]), (T[-1], summary["I"] + 0.5), fontsize=18)
 
     if args.lra:
-        ax2 = ax1.twinx()
-        ax2.set_ylim(ymin=0, ymax=31)
+        ax2 = axs[1][0]
+
+        # ax2 = ax1.twinx()
+        ax2.xaxis.tick_top()
+        ax2.grid(True, linestyle="dotted")
+        # ax2.set_ylim(ymin=0, ymax=22)
+        # ax2.set_yticks(list(range(0, 21, 4)))
         ax2.set_ylabel("Loudness Range (LU)")
-        ax2.set_yticks(list(range(0, 31, 2)))
-        ax2.plot(T, lra, label="Loudness Range", color='g', linewidth=1.5)
-        ax2.legend(loc='upper right', shadow=True, fontsize='large')
+
+        # Sometimes the beginning and end of a track have exceedingly large
+        # loudness ranges, which throw off the scale for the rest of the graph,
+        # so we'll remove the first 15 seconds and last 6 seconds before
+        # plotting. This is absolutely not optimal at all, and better ideas
+        # are vigorously accepted.
+        # FIXME: should this have a fixed scale instead?
+        ax2.plot(T[150:-60], lra[150:-60], label="Loudness Range", color='g', linewidth=1.5)
+        # ax2.legend(loc='upper right', shadow=True, fontsize='large')
 
     if args.write_graph:
         plt.savefig(args.outfile)
@@ -258,7 +295,7 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], args: argparse.
 
     # print(summary)
 
-    return 0
+    return
 
 
 def CheckFile(extensions: Optional[Set[str]] = None, must_exist: bool = False) -> Type[argparse.Action]:
@@ -411,7 +448,7 @@ def main(argv: List[str]) -> int:
     # log = lg.getLogger()
 
     lind, summary = gen_loudness(args.file, args)
-    gen_graph(lind, summary, args)
+    gen_graph(lind, summary, f"Loudness Analysis: {args.file.name}", args)
 
     return 0
 
