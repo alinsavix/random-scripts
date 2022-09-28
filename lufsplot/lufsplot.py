@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 import argparse
+import errno
+import os
 # import logging as lg
 import re
 import subprocess
 import sys
+import warnings
 from enum import IntEnum
 from pathlib import Path
-from typing import (Any, Dict, List, Optional, Sequence, Set, Text, Tuple,
-                    Type, Union)
+from typing import (Any, Dict, Iterable, List, Optional, Sequence, Set, Text,
+                    Tuple, Type, Union)
 
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
+from matplotlib.axes import Axes
 
 # ffmpeg -i thing.mp4 -af ebur128=peak=true -f null -
 #
@@ -110,95 +114,234 @@ def sec_to_hms(secs: float) -> str:
         return f"{minutes:d}:{secs:02d}"
 
 
+class LoudnessException(Exception):
+    pass
+
+class LoudnessNoFfmpegException(LoudnessException):
+    pass
+
+class LoudnessDurationException(LoudnessException):
+    pass
+
+class LoudnessNoFfprobeException(LoudnessDurationException):
+    pass
+
+class LoudnessFfprobeError(LoudnessDurationException):
+    pass
+
+class LoudnessFfprobeNoResult(LoudnessDurationException):
+    pass
+
+
+# FIXME: We should make this whole thing a context manager
+class Loudness:
+    _args: argparse.Namespace
+    _file: Path
+    _proc: Optional[subprocess.Popen[str]]
+    _duration: Optional[float] = None
+
+    def __init__(self, file: Path, args: argparse.Namespace) -> None:
+        if not file.exists():
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(file))
+
+        self._file = file
+        self._args = args
+        self._proc = None
+
+
+    # make sure children get reaped when we get destroyed.
+    def __del__(self) -> None:
+        self.close()
+
+
+    # use ffprobe to get the duration of the media
+    def duration(self) -> float:
+        if self._duration is not None:
+            return self._duration
+
+        try:
+            output = subprocess.check_output(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1", str(self._file)],
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                universal_newlines=True,
+                timeout=5,
+            )
+
+        except FileNotFoundError:
+            raise LoudnessNoFfprobeException(
+                "ERROR: Unable to execute ffprobe, verify it exists in your PATH"
+            )
+
+        except subprocess.CalledProcessError as e:
+            raise LoudnessFfprobeError(
+                f"ERROR: ffprobe returned exit code {e.returncode}, duration not available"
+            )
+
+        except subprocess.TimeoutExpired:
+            raise LoudnessFfprobeError(
+                "ERROR: ffprobe timed out before returning a media duration"
+            )
+
+        # This is kinda lazy, but the output of ffprobe should be exactly one
+        # line, as a floating point number, so just try to use it directly
+        try:
+            self._duration = float(output)
+            return self._duration
+        except ValueError:
+            raise LoudnessFfprobeNoResult(
+                "ERROR: ffprobe ran successfully, but did not output a parseable result"
+            )
+
+
+    def _ffmpeg_open_loudness(self) -> subprocess.Popen[str]:
+        try:
+            proc = subprocess.Popen(
+                ["ffmpeg", "-i", str(self._file), "-af",
+                 "ebur128=peak=true", "-f", "null", "-"],
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+            )
+
+        except FileNotFoundError:
+            raise LoudnessNoFfmpegException(
+                "ERROR: Unable to execute ffmpeg, verify it exists in your PATH")
+
+        return proc
+
+
+    def _ffmpeg_close(self, proc: subprocess.Popen[str]) -> Optional[int]:
+        if not proc:
+            raise ValueError("I/O operation when no file is open")
+
+        retval = None
+        try:
+            retval = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+
+        if not retval:
+            try:
+                retval = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+        if not retval:
+            try:
+                retval = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                warnings.warn("Unable to terminate ffmpeg subprocess",
+                              category=UserWarning)
+
+        if retval is not None and retval != 0:
+            warnings.warn(f"ffmpeg exited with return code {retval}", category=UserWarning)
+
+        return retval
+
+
+    # FIXME: do we really just want to support a single value iterable per
+    # loudness object?
+    def values(self) -> Iterable[List[float]]:
+        if self._proc is not None:
+            self.close()
+
+        self._proc = self._ffmpeg_open_loudness()
+        assert self._proc.stdout is not None
+
+        while self._proc.stdout.readable():
+            line = self._proc.stdout.readline()
+
+            if not line:
+                break
+
+            if self._args.debug:
+                print(f"DEBUG: ffmpeg: {line}", end="", file=sys.stderr)
+
+            # if we hit the summary block, we're mostly done, so bail
+            if " Summary:" in line:
+                break
+
+            m = re_ffmpeg.match(line.strip())
+            if not m:
+                # print(f"DEBUG: SKIPPING LINE: {line}")
+                continue
+
+            # Until we get a full 'short' chunk of audio, many of our stats are
+            # going to be super wonky, so we're just going to completely skip that
+            # data, since we won't have any pathological cases where it actually
+            # matters
+            if float(m.group("time")) <= 3.1:
+                continue
+
+            # Make a single datapoint, and append it to our collection. Pity that
+            # you can't specify data types as part of the regex itself so that
+            # you don't have to convert each thing here...
+            one = [
+                float(m.group("time")),
+                float(m.group("target")),
+                float(m.group("momentary")),
+                float(m.group("short")),
+                float(m.group("integrated")),
+                float(m.group("lra")),
+                max(float(m.group("ftpk_l")), float(m.group("ftpk_r"))),
+                max(float(m.group("tpk_l")), float(m.group("tpk_r")))
+            ]
+
+            yield one
+
+
+    # Call this when we run out of data, or we hit the summary block. It
+    # expects proc.stdout to be positioned before the data portion of the
+    # summary block in the ffmpeg output.
+    def summary(self) -> Dict[str, float]:
+        assert self._proc is not None
+        assert self._proc.stdout is not None
+
+        summary: Dict[str, float] = {}
+        while self._proc.stdout.readable():
+            line = self._proc.stdout.readline()
+
+            if not line:
+                break
+
+            if self._args.debug:
+                print(f"DEBUG: ffmpeg: {line}", end="", file=sys.stderr)
+
+            m = re_ffmpeg_summary.match(line)
+            if not m:
+                # print(f"DEBUG: SKIPPING LINE: {line}")
+                continue
+
+            summary[m.group("field")] = float(m.group("value"))
+
+        return summary
+
+
+    def close(self) -> None:
+        if self._proc is not None:
+            self._ffmpeg_close(self._proc)
+            self._proc = None
+
+
+
 # Can't quiiiiite type the multi-dimensional numpy array correctly, alas
 def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
     # Create python lists now, then convert to a numpy array at the end, for
     # much better performance.
     li: List[List[float]] = []
 
-    try:
-        proc = subprocess.Popen(
-            ["ffmpeg", "-i", str(file), "-af", "ebur128=peak=true", "-f", "null", "-"],
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-        )
-    except FileNotFoundError:
-        print("ERROR: Unable to execute ffmpeg, verify it exists in your PATH", file=sys.stderr)
-        sys.exit(1)
+    loudness = Loudness(file, args)
+    # print(f"duration: {loudness.duration()}")
 
-    assert proc.stdout is not None
-
-    # read and parse the results, a line at a time
-    # FIXME: if we use split() instead of regexes here, how does that change performance?
-    while proc.stdout.readable():
-        line = proc.stdout.readline()
-
-        if not line:
-            break
-
-        if args.debug:
-            print(f"DEBUG: ffmpeg: {line}", end="", file=sys.stderr)
-
-        # if we hit the summary block, we're mostly done, so bail
-        if " Summary:" in line:
-            break
-
-        # print(line)
-
-        m = re_ffmpeg.match(line.strip())
-        if not m:
-            # print(f"DEBUG: SKIPPING LINE: {line}")
-            continue
-
-        # Until we get a full 'short' chunk of audio, many of our stats are
-        # going to be super wonky, so we're just going to completely skip that
-        # data, since we won't have any pathological cases where it actually
-        # matters
-        if float(m.group("time")) <= 3.1:
-            continue
-
-        # Make a single datapoint, and append it to our collection. Pity that
-        # you can't specify data types as part of the regex itself so that
-        # you don't have to convert each thing here...
-        one = [
-            float(m.group("time")),
-            float(m.group("target")),
-            float(m.group("momentary")),
-            float(m.group("short")),
-            float(m.group("integrated")),
-            float(m.group("lra")),
-            max(float(m.group("ftpk_l")), float(m.group("ftpk_r"))),
-            max(float(m.group("tpk_l")), float(m.group("tpk_r")))
-        ]
+    for one in loudness.values():
         li.append(one)
 
-    # If we got here, we either ran out of data, or we hit the summary
-    # block, so do our best to read whatever summary info if it exists:
-    summary: Dict[str, float] = {}
-    while proc.stdout.readable():
-        line = proc.stdout.readline()
-
-        if not line:
-            break
-
-        if args.debug:
-            print(f"DEBUG: ffmpeg: {line}", end="", file=sys.stderr)
-
-        m = re_ffmpeg_summary.match(line)
-        if not m:
-            # print(f"DEBUG: SKIPPING LINE: {line}")
-            continue
-
-        summary[m.group("field")] = float(m.group("value"))
-
-    proc.wait(timeout=5)
-    if proc.returncode != 0:
-        print(
-            f"\nERROR: ffmpeg returned error code {proc.returncode}, can't continue", file=sys.stderr)
-        sys.exit(1)
+    summary = loudness.summary()
+    loudness.close()
 
     # We've gathered all the data, put it in a useful form
     lind: npt.NDArray[Any] = np.array(li)  # type: ignore
@@ -206,15 +349,7 @@ def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any]
     return lind, summary
 
 
-# Most of the matplotlib stuff have shitty typing support :(
-def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, args: argparse.Namespace) -> None:
-    T = lind[:, Fields.TIME]
-    momentary = lind[:, Fields.MOMENTARY]
-    short = lind[:, Fields.SHORT]
-    integrated = lind[:, Fields.INTEGRATED]
-    lra = lind[:, Fields.LRA]
-    ftpk = lind[:, Fields.FTPK]
-
+def prep_graph(duration: float, title: str, args: argparse.Namespace) -> Tuple[Axes, Optional[Axes]]:
     if args.lra:
         numrows = 2
         gridspec = {'height_ratios': [5, 1]}
@@ -228,7 +363,7 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, arg
 
     ax1 = axs[0][0]
     # ax1.set_xlabel("seconds")
-    ax1.set_xticks(list(range(0, int(np.max(T)), 30)))
+    ax1.set_xticks(list(range(0, int(duration), 30)))
     ax1.set_xticklabels([sec_to_hms(x) for x in ax1.get_xticks()])
 
     ax1.set_ylim(ymin=-60, ymax=6)
@@ -237,10 +372,36 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, arg
     ax1.set_yticks(list(range(-57, 4, 6)), minor=True)
     ax1.grid(True, linestyle="dotted")
 
+    # FIXME: should this be here, or in the actual plotting?
     ax1.axhline(y=-14.0, color='orange',
                 label="_Youtube Integrated Target", linewidth=3, alpha=1.0)
     ax1.annotate("Youtube Integrated Target (-14.0 LUFS)", (0, -13.9), fontsize=14)
 
+    if args.lra:
+        ax2 = axs[1][0]
+
+        # ax2 = ax1.twinx()
+        ax2.xaxis.tick_top()
+        ax2.grid(True, linestyle="dotted")
+        # ax2.set_ylim(ymin=0, ymax=22)
+        # ax2.set_yticks(list(range(0, 21, 4)))
+        ax2.set_ylabel("Loudness Range (LU)")
+    else:
+        ax2 = None
+
+    return ax1, ax2
+
+
+# Most of the matplotlib stuff have shitty typing support :(
+def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, args: argparse.Namespace) -> None:
+    T = lind[:, Fields.TIME]
+    momentary = lind[:, Fields.MOMENTARY]
+    short = lind[:, Fields.SHORT]
+    integrated = lind[:, Fields.INTEGRATED]
+    lra = lind[:, Fields.LRA]
+    ftpk = lind[:, Fields.FTPK]
+
+    ax1, ax2 = prep_graph(int(np.max(T)), title, args)
 
     if args.momentary:
         ax1.plot(T, np.ma.masked_where(momentary <= -120.7, momentary),
@@ -269,15 +430,7 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, arg
         ax1.annotate(str(summary["I"]), (T[-1], summary["I"] + 0.5), fontsize=18)
 
     if args.lra:
-        ax2 = axs[1][0]
-
-        # ax2 = ax1.twinx()
-        ax2.xaxis.tick_top()
-        ax2.grid(True, linestyle="dotted")
-        # ax2.set_ylim(ymin=0, ymax=22)
-        # ax2.set_yticks(list(range(0, 21, 4)))
-        ax2.set_ylabel("Loudness Range (LU)")
-
+        assert ax2 is not None
         # Sometimes the beginning and end of a track have exceedingly large
         # loudness ranges, which throw off the scale for the rest of the graph,
         # so we'll remove the first 15 seconds and last 6 seconds before
@@ -292,8 +445,6 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, arg
 
     if args.interactive:
         plt.show()
-
-    # print(summary)
 
     return
 
