@@ -6,16 +6,20 @@ import os
 import re
 import subprocess
 import sys
+import time
 import warnings
 from enum import IntEnum
 from pathlib import Path
-from typing import (Any, Dict, Iterable, List, Optional, Sequence, Set, Text,
-                    Tuple, Type, Union)
+from typing import (Any, Dict, Generator, Iterable, List, Optional, Sequence,
+                    Set, Text, Tuple, Type, Union)
 
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
-from matplotlib.axes import Axes
+from matplotlib import animation
+from matplotlib.axes import Axes  # Just for typing
+from matplotlib.figure import Figure  # also also just for typing
+from matplotlib.lines import Line2D  # also just for typing
 
 # ffmpeg -i thing.mp4 -af ebur128=peak=true -f null -
 #
@@ -114,6 +118,27 @@ def sec_to_hms(secs: float) -> str:
         return f"{minutes:d}:{secs:02d}"
 
 
+# Convert seconds to e.g. 1h15m6s
+def sec_to_str(secs: float) -> str:
+    hours = int(secs // (60 * 60))
+    secs %= (60 * 60)
+
+    minutes = int(secs // 60)
+    secs %= 60
+
+    secs = int(secs)
+
+    if hours:
+        return f"{hours:d}h{minutes:d}m{secs:d}s"
+    elif minutes:
+        return f"{minutes:d}m{secs:d}s"
+    else:
+        return f"{secs:d}s"
+
+
+#
+# class: Loudness - retrieve a series of loudness values from a media file
+#
 class LoudnessException(Exception):
     pass
 
@@ -245,7 +270,7 @@ class Loudness:
 
     # FIXME: do we really just want to support a single value iterable per
     # loudness object?
-    def values(self) -> Iterable[List[float]]:
+    def values(self) -> Generator[List[float], None, None]:
         if self._proc is not None:
             self.close()
 
@@ -328,6 +353,10 @@ class Loudness:
 
 
 
+#
+# Main code
+#
+
 # Can't quiiiiite type the multi-dimensional numpy array correctly, alas
 def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any], Dict[str, float]]:
     # Create python lists now, then convert to a numpy array at the end, for
@@ -335,7 +364,7 @@ def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any]
     li: List[List[float]] = []
 
     loudness = Loudness(file, args)
-    # print(f"duration: {loudness.duration()}")
+    print(f"duration: {loudness.duration()}")
 
     for one in loudness.values():
         li.append(one)
@@ -349,7 +378,11 @@ def gen_loudness(file: Path, args: argparse.Namespace) -> Tuple[npt.NDArray[Any]
     return lind, summary
 
 
-def prep_graph(duration: float, title: str, args: argparse.Namespace) -> Tuple[Axes, Optional[Axes]]:
+X_PADDING = 10.0
+def prep_graph(duration: float, title: str, args: argparse.Namespace) -> Tuple[Figure, Axes, Optional[Axes], Dict[int, Line2D], Dict[int, Line2D]]:
+    ax1_lines: Dict[int, Line2D] = {}
+    ax2_lines: Dict[int, Line2D] = {}
+
     if args.lra:
         numrows = 2
         gridspec = {'height_ratios': [5, 1]}
@@ -357,12 +390,13 @@ def prep_graph(duration: float, title: str, args: argparse.Namespace) -> Tuple[A
         numrows = 1
         gridspec = {}
 
-    _, axs = plt.subplots(numrows, 1, sharex=True, gridspec_kw=gridspec, squeeze=False,
-                          figsize=(19.20, 10.80), dpi=72, linewidth=0.1, tight_layout=True)
+    fig, axs = plt.subplots(numrows, 1, sharex=True, gridspec_kw=gridspec, squeeze=False,
+                            figsize=(19.20, 10.80), dpi=72, linewidth=0.1, tight_layout=True)
     plt.suptitle(title, size=16.0)
-
+    x = fig
     ax1 = axs[0][0]
     # ax1.set_xlabel("seconds")
+    ax1.set_xlim(xmin=0, xmax=duration + X_PADDING)
     ax1.set_xticks(list(range(0, int(duration), 30)))
     ax1.set_xticklabels([sec_to_hms(x) for x in ax1.get_xticks()])
 
@@ -372,10 +406,29 @@ def prep_graph(duration: float, title: str, args: argparse.Namespace) -> Tuple[A
     ax1.set_yticks(list(range(-57, 4, 6)), minor=True)
     ax1.grid(True, linestyle="dotted")
 
+    ax1.format_coord = lambda x, y: f"x={sec_to_hms(x)}, y={y:0.2f}"
+
     # FIXME: should this be here, or in the actual plotting?
     ax1.axhline(y=-14.0, color='orange',
                 label="_Youtube Integrated Target", linewidth=3, alpha=1.0)
     ax1.annotate("Youtube Integrated Target (-14.0 LUFS)", (0, -13.9), fontsize=14)
+
+    if args.momentary:
+        ax1_lines[Fields.MOMENTARY] = ax1.plot(
+            [], [], label="Momentary", color='m', linewidth=0.5)[0]
+
+    if args.short:
+        ax1_lines[Fields.SHORT] = ax1.plot([], [], label="Short", color='b', linewidth=0.75)[0]
+
+    if args.integrated:
+        ax1_lines[Fields.INTEGRATED] = ax1.plot(
+            [], [], label="Integrated", color='b', linewidth=2)[0]
+
+    if args.clipping:
+        ax1_lines[Fields.FTPK] = ax1.plot([], [], label="Clipping", color='r', linewidth=3)[0]
+
+    ax1.legend(loc='upper left', shadow=True, fontsize='large')
+
 
     if args.lra:
         ax2 = axs[1][0]
@@ -383,13 +436,20 @@ def prep_graph(duration: float, title: str, args: argparse.Namespace) -> Tuple[A
         # ax2 = ax1.twinx()
         ax2.xaxis.tick_top()
         ax2.grid(True, linestyle="dotted")
+        ax2.set_xlim(xmin=0, xmax=duration + X_PADDING)
         # ax2.set_ylim(ymin=0, ymax=22)
         # ax2.set_yticks(list(range(0, 21, 4)))
         ax2.set_ylabel("Loudness Range (LU)")
+        ax2.format_coord = lambda x, y: f"x={sec_to_hms(x)}, y={y:0.2f}"
+
+        ax2_lines[Fields.LRA] = ax2.plot(
+            [], [], label="Loudness Range", color='g', linewidth=1.5)[0]
     else:
         ax2 = None
 
-    return ax1, ax2
+    # plt.tight_layout()
+
+    return fig, ax1, ax2, ax1_lines, ax2_lines
 
 
 # Most of the matplotlib stuff have shitty typing support :(
@@ -401,30 +461,30 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, arg
     lra = lind[:, Fields.LRA]
     ftpk = lind[:, Fields.FTPK]
 
-    ax1, ax2 = prep_graph(int(np.max(T)), title, args)
+    fig, ax1, ax2, ax1_lines, ax2_lines = prep_graph(int(np.max(T)), title, args)
 
     if args.momentary:
-        ax1.plot(T, np.ma.masked_where(momentary <= -120.7, momentary),
-                 label="Momentary", color='m', linewidth=0.5)
+        ax1_lines[Fields.MOMENTARY].set_data(
+            T, np.ma.masked_where(momentary <= -120.7, momentary))
 
     if args.short:
-        ax1.plot(T, np.ma.masked_where(short <= -120.7, short),
-                 label="Short", color='b', linewidth=0.75)
+        ax1_lines[Fields.SHORT].set_data(T, np.ma.masked_where(short <= -120.7, short))
 
     if args.integrated:
-        ax1.plot(T, np.ma.masked_where(integrated <= -70.0, integrated),
-                 label="Integrated", color='b', linewidth=2)
+        ax1_lines[Fields.INTEGRATED].set_data(
+            T, np.ma.masked_where(integrated <= -70.0, integrated))
 
     if args.clipping:
-        ax1.plot(T, np.ma.masked_where(ftpk < -1.0, ftpk),
-                 label="Clipping", color='r', linewidth=3)
+        ax1_lines[Fields.FTPK].set_data(T, np.ma.masked_where(ftpk < -1.0, ftpk))
 
-    ax1.legend(loc='upper left', shadow=True, fontsize='large')
+
+    # ax1.legend(loc='upper left', shadow=True, fontsize='large')
 
     if summary["LRA low"] and summary["LRA high"]:
         ax1.axhspan(summary["LRA low"], summary["LRA high"], color='g', alpha=.1)
 
     if summary["I"]:
+        print(f"plotting final integrated value of {summary['I']} at T={T[-1]}")
         ax1.plot(T[-1:], summary["I"], label="_Integrated Final",
                  color='b', marker='o', markersize=7)
         ax1.annotate(str(summary["I"]), (T[-1], summary["I"] + 0.5), fontsize=18)
@@ -436,9 +496,17 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, arg
         # so we'll remove the first 15 seconds and last 6 seconds before
         # plotting. This is absolutely not optimal at all, and better ideas
         # are vigorously accepted.
-        # FIXME: should this have a fixed scale instead?
-        ax2.plot(T[150:-60], lra[150:-60], label="Loudness Range", color='g', linewidth=1.5)
-        # ax2.legend(loc='upper right', shadow=True, fontsize='large')
+        ax2_lines[Fields.LRA].set_data(T[150:-60], lra[150:-60])
+
+        ax2.relim()
+        ax2.autoscale_view(tight=True, scalex=False, scaley=True)
+
+    # from tdvutil import ppretty
+    # print(ppretty(ax1, depth=8))
+    # print("=====================")
+    # print(ppretty(plt))
+
+    plt.draw()
 
     if args.write_graph:
         plt.savefig(args.outfile)
@@ -447,6 +515,148 @@ def gen_graph(lind: npt.NDArray[Any], summary: Dict[str, float], title: str, arg
         plt.show()
 
     return
+
+
+anim_time = None
+first_frame_time = None
+start_time = time.perf_counter()
+accumulate_time = 0.0
+
+# FIXME: this function does too much
+def animate(frame: int, total_frames: int, duration: float, loudness: Loudness,
+            values: Generator[List[float], None, None], ax1: Axes, ax2: Axes,
+            ax1_lines: Dict[int, Line2D], ax2_lines: Dict[int, Line2D],
+            accumulator: List[List[float]], args: argparse.Namespace):
+
+    global first_frame_time
+    if frame == 0:
+        first_frame_time = time.perf_counter()
+
+    global anim_time
+    current_time = time.perf_counter()
+    if anim_time is not None:
+        time_diff = current_time - anim_time
+        print(f"animate called, time delta: {time_diff:0.6f}s")
+
+
+    pct_done = (frame + 1) / total_frames
+    time_limit = duration * pct_done + 1
+
+    prev_points = len(accumulator)
+
+    accumulate_pre = time.perf_counter()
+    while True:
+        one = next(values, None)
+
+        if one is None:
+            break
+
+        accumulator.append(one)
+        if one[Fields.TIME] > time_limit:
+            break
+
+    global accumulate_time
+    accumulate_time += (time.perf_counter() - accumulate_pre)
+
+    # print(f"frame {frame:3d} time limit {time_limit:.3f}:  {len(accumulator) - prev_points}")
+
+    # now re-render our graphs
+    # FIXME: is there a better/more efficient way to manage all this?
+    lind: npt.NDArray[Any] = np.array(accumulator)  # type: ignore
+
+    T = lind[:, Fields.TIME]
+    momentary = lind[:, Fields.MOMENTARY]
+    short = lind[:, Fields.SHORT]
+    integrated = lind[:, Fields.INTEGRATED]
+    lra = lind[:, Fields.LRA]
+    ftpk = lind[:, Fields.FTPK]
+
+    if args.momentary:
+        ax1_lines[Fields.MOMENTARY].set_data(
+            T, np.ma.masked_where(momentary <= -120.7, momentary))
+
+    if args.short:
+        ax1_lines[Fields.SHORT].set_data(T, np.ma.masked_where(short <= -120.7, short))
+
+    if args.integrated:
+        ax1_lines[Fields.INTEGRATED].set_data(
+            T, np.ma.masked_where(integrated <= -70.0, integrated))
+
+    if args.clipping:
+        ax1_lines[Fields.FTPK].set_data(T, np.ma.masked_where(ftpk < -1.0, ftpk))
+
+
+    # ax1.legend(loc='upper left', shadow=True, fontsize='large')
+
+    # if summary["LRA low"] and summary["LRA high"]:
+    #     ax1.axhspan(summary["LRA low"], summary["LRA high"], color='g', alpha=.1)
+
+    # if summary["I"]:
+    #     ax1.plot(T[-1:], summary["I"], label="_Integrated Final",
+    #              color='b', marker='o', markersize=7)
+    #     ax1.annotate(str(summary["I"]), (T[-1], summary["I"] + 0.5), fontsize=18)
+
+    if args.lra:
+        # Sometimes the beginning and end of a track have exceedingly large
+        # loudness ranges, which throw off the scale for the rest of the graph,
+        # so we'll remove the first 15 seconds and last 6 seconds before
+        # plotting. This is absolutely not optimal at all, and better ideas
+        # are vigorously accepted.
+        ax2_lines[Fields.LRA].set_data(T[150:-60], lra[150:-60])
+        ax2.relim()
+        ax2.autoscale_view(scalex=False, scaley=True)
+
+    # if we're at the end, add some extras, if they're available
+    if (frame + 1) == total_frames:
+        # print("Last frame, generating summary")
+        summary = loudness.summary()
+
+        if summary["LRA low"] and summary["LRA high"]:
+            ax1.axhspan(summary["LRA low"], summary["LRA high"], color='g', alpha=.1)
+
+        if summary["I"]:
+            ax1.plot(T[-1:], summary["I"], label="_Integrated Final",
+                     color='b', marker='o', markersize=7)
+            ax1.annotate(str(summary["I"]), (T[-1], summary["I"] + 0.5), fontsize=18)
+
+        print(
+            f"final frame rendered, total render time: {time.perf_counter() - first_frame_time:0.6f}s")
+        print(f"TOTAL ACCUMULATE TIME: {accumulate_time:0.6f}s")
+        print(f"TOTAL RUNTIME: {time.perf_counter() - start_time:0.6f}s")
+
+    done_time = time.perf_counter()
+    anim_time = done_time
+    execution_time = done_time - current_time
+    print(f"animate completed in {execution_time:0.6f}s")
+
+    return
+
+
+def gen_interactive(file: Path, title: str, args: argparse.Namespace) -> None:
+    loudness = Loudness(file, args)
+    fig, ax1, ax2, ax1_lines, ax2_lines = prep_graph(
+        duration=loudness.duration(), title=title, args=args)
+    framecount = 50
+
+    # animation function args (ugh, find a better way, bitch)
+    fargs = (  # type: ignore
+        framecount,   # total_frames
+        loudness.duration(),  # duration
+        loudness,  # loudness object (so we can get summary)
+        loudness.values(),  # loudnesses
+        ax1,
+        ax2,
+        ax1_lines,
+        ax2_lines,
+        [],  # accumulator
+        args
+    )
+
+    # FIXME: do we need a 'fig' here or is plt good enough?
+    ani = animation.FuncAnimation(fig, animate, fargs=fargs, frames=framecount,
+                                  interval=1, repeat=False, blit=False, cache_frame_data=False)
+
+    plt.show()
 
 
 def CheckFile(extensions: Optional[Set[str]] = None, must_exist: bool = False) -> Type[argparse.Action]:
@@ -598,8 +808,10 @@ def main(argv: List[str]) -> int:
 
     # log = lg.getLogger()
 
-    lind, summary = gen_loudness(args.file, args)
-    gen_graph(lind, summary, f"Loudness Analysis: {args.file.name}", args)
+    # lind, summary = gen_loudness(args.file, args)
+    # gen_graph(lind, summary, f"Loudness Analysis: {args.file.name}", args)
+
+    gen_interactive(args.file, f"Loudness Analysis: {args.file.name}", args)
 
     return 0
 
