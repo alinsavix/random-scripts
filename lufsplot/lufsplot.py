@@ -365,8 +365,22 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
 
     # ax1 = axs[0][0]
     # ax1.set_xlabel("seconds")
+
+    # This sometimes breaks the graphs and sometimes doesn't and I have exactly
+    # zero clue how to get it to work reliably. :(
+    # happy = Path(__file__).parent / "ongHappy.png"
+    # if happy.exists():
+    #     img = plt.imread(str(happy))
+    #     ax2.imshow(img, alpha=0.3,
+    #                extent=[duration - 20.0 + X_PADDING, duration + X_PADDING, 0.0, 20.0])
+
+    if duration > (15 * 60):
+        xtick_interval = 60
+    else:
+        xtick_interval = 30
+
     ax1.set_xlim(xmin=0, xmax=duration + X_PADDING)
-    ax1.set_xticks(list(range(0, int(duration), 30)))
+    ax1.set_xticks(list(range(0, int(duration), xtick_interval)))
     ax1.set_xticklabels([sec_to_hms(x) for x in ax1.get_xticks()])
 
     ax1.set_ylim(ymin=-60, ymax=1)
@@ -378,9 +392,9 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
     ax1.format_coord = lambda x, y: f"x={sec_to_hms(x)}, y={y:0.2f}"
 
     # FIXME: should this be here, or in the actual plotting?
-    ax1.axhline(y=-14.0, color='orange',
-                label="_Youtube Integrated Target", linewidth=3, alpha=1.0)
-    ax1.annotate("Youtube Integrated Target (-14.0 LUFS)", (0, -13.9), fontsize=14)
+    ax1.axhline(y=args.target_lufs, color='orange',
+                label="_Integrated Target", linewidth=3, alpha=1.0)
+    ax1.annotate(" " + args.target_desc, (0, args.target_lufs + 0.1), fontsize=14)
 
     if args.momentary:
         ax1_lines[Fields.MOMENTARY] = ax1.plot(
@@ -394,7 +408,8 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
             [], [], label="Integrated", color='b', linewidth=2)[0]
 
     if args.clipping:
-        ax1_lines[Fields.FTPK] = ax1.plot([], [], label="Clipping", color='r', linewidth=3)[0]
+        ax1_lines[Fields.FTPK] = ax1.plot(
+            [], [], label=f"Clipping ({args.clip_at}dB)", color='r', linewidth=3)[0]
 
     ax1.legend(loc='lower left', shadow=True, fontsize='large')
 
@@ -405,7 +420,7 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
         ax2.xaxis.tick_top()
         ax2.grid(True, linestyle="dotted")
         ax2.set_xlim(xmin=0, xmax=duration + X_PADDING)
-        ax2.set_ylim(ymin=0.0, ymax=20.0)
+        ax2.set_ylim(ymin=0.0, ymax=20.5)
         ax2.set_yticks(list(range(0, 21, 5)))
 
         # ax2.set_ylim(ymin=0, ymax=22)
@@ -548,7 +563,7 @@ class LUFSLoadAnimation:
 
         if self.args.clipping:
             self._lines[0][Fields.FTPK].set_data(
-                T, np.ma.masked_where(ftpk < -1.0, ftpk.clip(0.0, 0.0)))
+                T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk.clip(0.0, 0.0)))
 
         if self.args.lra:
             # Sometimes the beginning and end of a track have exceedingly large
@@ -556,7 +571,7 @@ class LUFSLoadAnimation:
             # so we'll remove the first 15 seconds and last 6 seconds before
             # plotting. This is absolutely not optimal at all, and better ideas
             # are vigorously accepted.
-            self._lines[1][Fields.LRA].set_data(T[150:-60], lra[150:-60])
+            self._lines[1][Fields.LRA].set_data(T[150:-60], lra[150:-60].clip(None, 20.0))
             self._axs[1].relim()
             self._axs[1].autoscale_view(scalex=False, scaley=True)
 
@@ -648,6 +663,43 @@ def gen_loudness(file: Path, title: str, args: argparse.Namespace) -> None:
     return
 
 
+lufs_targets = {
+    "amazon": (-11.0, "Amazon Integrated Target"),
+    "apple": (-16.0, "Apple Music Integrated Target"),
+    "beatport": (-8.0, "Beatport/DJ Stores Integrated Target"),
+    "spotify": (-14.0, "Spotify Integrated Target"),
+    "youtube": (-14.0, "YouTube Integrated Target"),
+}
+
+# returns the target string unchanged (it'll be used later) or raise a type error
+def check_lufs_target(target: str) -> str:
+    try:
+        val = float(target)
+        if val > 0.0 or val < -60.0:
+            raise argparse.ArgumentTypeError("Custom LUFS target must be between -60.0 and 0.0")
+
+        return target
+    except ValueError:
+        if target.lower() not in lufs_targets:
+            raise argparse.ArgumentTypeError(
+                f"LUFS target must be FLOAT or one of: {', '.join(lufs_targets.keys())}")
+
+    # else, we're good
+    return target
+
+# sets args.target_lufs, args.target_desc
+def set_lufs_target(args: argparse.Namespace, target) -> None:
+    try:
+        val = float(target)
+        args.target_lufs = val
+        args.target_desc = f"Custom Integrated Target ({val:.1f} LUFS)"
+    except ValueError:
+        val, desc = lufs_targets[target.lower()]
+        args.target_lufs = val
+        args.target_desc = f"{desc} ({int(val)} LUFS)"
+
+    return
+
 
 def CheckFile(extensions: Optional[Set[str]] = None, must_exist: bool = False) -> Type[argparse.Action]:
     class Act(argparse.Action):
@@ -720,6 +772,34 @@ def parse_arguments(argv: List[str]):
     )
 
     parser.add_argument(
+        "--target",
+        default="youtube",
+        type=check_lufs_target,
+        help="target LUFS, or one of: amazon, apple, beatport, spotify, youtube (default: youtube)"
+    )
+
+    parser.add_argument(
+        "--target_lufs",
+        default=0.0,
+        type=float,
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
+        "--target_desc",
+        default="",
+        type=str,
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
+        "--clip-at",
+        default=-1.0,
+        type=float,
+        help="dB value above which is considered to be clipping (default: -1.0)",
+    )
+
+    parser.add_argument(
         "--momentary",
         "--no-momentary",
         default=False,
@@ -760,7 +840,7 @@ def parse_arguments(argv: List[str]):
         "--no-clipping",
         default=True,
         action=NegateAction,
-        nargs=0,
+        nargs=1,
         help="show where true peak is higher than -1.0dbFS (default: yes)",
     )
 
@@ -773,6 +853,7 @@ def parse_arguments(argv: List[str]):
     )
 
     parsed_args = parser.parse_args(argv)
+    set_lufs_target(parsed_args, parsed_args.target)
 
     # make sure we enable writing the graph if the user specifies a filename
     if parsed_args.outfile:
