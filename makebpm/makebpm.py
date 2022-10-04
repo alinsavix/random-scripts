@@ -147,18 +147,50 @@ def write_framelist(framelist_file: Path, animcache: Path, fps: float, framelist
             # print(f"duration {time_per_video_frame_s}")
 
 
+# ffmpeg -hide_banner -hwaccels
+# encoders = {
+#     "default",
+#     "nvenc",
+#     "videotoolbox",
+# }
+
+# codecs = {
+#     "h264": {
+#         "args": {
+#             "all":
+#                 [
+#                     "-c:v", "libx264",
+#                     "-qp", "23",
+#                     "-vf", "format=yuv420p"
+#                 ],
+#         "valid_containers": {"mp4", "mov", "m4v", "mkv"}
+#     },
+#     "prores": {
+#         "args": [
+
+# }
 
 
 def render_video(outfile: Path, animcache: Path, fps: float, framelist: List[int]):
-    timeout = 30  # FIXME: make configurable?
+    timeout = 180  # FIXME: make configurable?
     framelist_file = outfile.with_suffix(outfile.suffix + ".framelist")
     write_framelist(framelist_file, animcache, fps, framelist)
 
     # ffmpeg -f concat -safe 0 -i list.txt -r 60 -c:v h264_nvenc -cq:v 23 -vf "format=yuv420p" -y $BPM.mp4 && start $BPM.mp4
     # FIXME: this should encode as prores w/ alpha (at least optionally)
-    cmd: List[str] = ["ffmpeg", "-hide_banner", "-f", "concat", "-safe", "0",
-                      "-i", str(framelist_file), "-r", str(fps), "-c:v", "libx264", "-qp", "23",
-                      "-vf", "format=yuv420p", "-y", str(outfile)]
+    cmd: List[str] = [
+        "ffmpeg", "-hide_banner",
+        "-f", "concat", "-safe", "0",
+        "-i", str(framelist_file),
+        "-r", str(fps),
+        "-an",
+        # "-c:v", "libx264", "-qp", "23", "-vf", "format=yuv420p",
+        # "-c:v", "prores_ks", "-profile:v", "4", "-quant_mat", "hq", "-pix_fmt", "yuva444p10le", "-alpha_bits", "8",
+        # part of vp8: "-crf", "30", "-b:v", "0"
+        "-vf", "format=rgba", "-c:v", "libvpx", "-auto-alt-ref", "0", "-crf", "30", "-b:v", "10M",
+        "-y",
+        str(outfile)
+    ]
     try:
         subprocess.run(cmd, shell=False, stdin=subprocess.DEVNULL, check=True, timeout=timeout)
     except FileNotFoundError:
@@ -238,8 +270,16 @@ def parse_arguments(argv: List[str]):
         "--outfile",
         type=Path,
         default=None,
-        action=CheckFile(extensions={'mov'}),
+        action=CheckFile(extensions={'mp4', 'mov', 'webm'}),
         help="output .mov file to generate (defaults to <animname>_<bpm>bpm.mov)",
+    )
+
+    parser.add_argument(
+        "--encoder",
+        type=str,
+        default="x264",
+        choices=["x264", "nvenc", "prores", "vp8", "vp9"],
+        help="encoder to use for created video",
     )
 
     # parser.add_argument(
