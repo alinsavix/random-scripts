@@ -607,7 +607,7 @@ class LUFSLoadAnimation:
             frames=self.anim_frame,
             init_func=self.anim_fig_init,
             save_count=0,
-            interval=0,
+            interval=1,
             repeat=False,
             blit=False,  # why doesn't this completely work?
             cache_frame_data=False,
