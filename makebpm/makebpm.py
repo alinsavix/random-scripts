@@ -7,23 +7,32 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, field
 # from enum import IntEnum
 from pathlib import Path
 from typing import (Any, Dict, List, Optional, Sequence, Set, Text, Tuple,
-                    Type, Union)
+                    Type, Union, cast)
 
+from dataclasses_json import DataClassJsonMixin
 from tdvutil.argparse import CheckFile
 
-#
-# things we need in config file:
-#   name
-#   filename pattern (maybe)
-#   number of frames
-#   beats per cycle
-#
-# encode: ffmpeg -i %d.png -vcodec png z.mov
-# decode: ffmpeg -i z.mov -f image2 export2\%d.png
-# BPM=384 ; ./makebpm.py $BPM > list.txt && ffmpeg -f concat -safe 0 -i list.txt -r 60 -c:v h264_nvenc -cq:v 23 -vf "format=yuv420p" -y $BPM.mp4 && start $BPM.mp4
+
+# A couple of useful datatypes
+@dataclass
+class AnimConfig(DataClassJsonMixin):
+    name: str
+    description: str
+    framecount: int
+    beats_per_cycle: int
+    has_alpha: bool
+
+@dataclass
+class EncoderInfo:
+    args_all: List[str]
+    args_noalpha: List[str]
+    args_alpha: Optional[List[str]]
+    valid_containers: Set[str]
+
 
 # FIXME: figure out better when to use "cachedir" (the parent cache dir)
 # and when to use "animdir" (the cache dir with the anim name appended)
@@ -69,8 +78,8 @@ def cache_anim(animname: str, animdir: Path, cachedir: Path) -> None:
     extract_anim(archive_path, cached_path)
 
 
-# FIXME: might want to validate the config, too
-AnimConfig = Dict[str, Union[str, int, float]]
+
+
 def load_config(animname: str, animdir: Path) -> AnimConfig:
     configpath = animdir / Path(animname).with_suffix(".json")
     if not configpath.exists():
@@ -78,8 +87,8 @@ def load_config(animname: str, animdir: Path) -> AnimConfig:
         sys.exit(1)
 
     try:
-        with configpath.open("r") as f:
-            config = json.load(f)
+        config_str = configpath.read_text()
+        config = AnimConfig.from_json(config_str)
     except json.JSONDecodeError as e:
         print(f"ERROR: couldn't load configuration for animation {animname}: {e}")
         sys.exit(1)
@@ -91,34 +100,33 @@ def load_config(animname: str, animdir: Path) -> AnimConfig:
 
 
 def gen_framelist(bpm: float, cycles: int, output_fps: float, config: AnimConfig) -> List[int]:
-    # match_bpm = int(sys.argv[1]) or 198
-    beats_per_cycle = int(config["beats_per_cycle"])  # restart every n beats
+    beats_per_cycle = int(config.beats_per_cycle)  # restart every n beats
 
-    anim_frames = int(config["framecount"])  # numbered starting at 1
-    # video_len_s = 10
-    video_len_s = 10  # temp, should use 'cycles' instead
+    anim_frames = int(config.framecount)  # frames numbered starting at 1
+    # video_len_s = 10  # temp, should use 'cycles' instead
 
     time_per_video_frame_s = 1.0 / output_fps
 
     one_cycle = (bpm / beats_per_cycle)   # how many times it needs to run per minute
     one_cycle_time_s = 60 / one_cycle
 
-
     # hokay, so, if we have one_cycle_time_s, and we have anim_frames in an
     # animation, we can figure out how long a given frame must exist to get
     # that length of animation.
     time_per_anim_frame_s = one_cycle_time_s / anim_frames
 
-    print(f"time per video frame (s): {time_per_video_frame_s}", file=sys.stderr)
-    print(f"time per animation cycle (s): {one_cycle_time_s}", file=sys.stderr)
-    print(f"time per anim frame (s): {time_per_anim_frame_s}", file=sys.stderr)
+    # And figure out long the final video will be for a given number of cycles
+    video_len_s = one_cycle_time_s * cycles
 
-    # sys.exit(0)
+    print(f"time per video frame: {time_per_video_frame_s:.6f}s")
+    print(f"time per animation cycle: {one_cycle_time_s:.6f}s")
+    print(f"time per anim frame: {time_per_anim_frame_s:.6f}s")
+    print(f"total video time: {video_len_s:6f}s")
+
     # And now, output our frame numbers for any given combination of things
     t = 0.0
-    # f = 0
     frames: List[int] = []
-    while t < video_len_s:
+    while t <= video_len_s:
         x = t / time_per_anim_frame_s
         useframe = (int(x) % anim_frames) + 1
 
@@ -128,7 +136,6 @@ def gen_framelist(bpm: float, cycles: int, output_fps: float, config: AnimConfig
         frames.append(useframe)
 
         t += time_per_video_frame_s
-        # f += 1
 
     return frames
 
@@ -143,8 +150,6 @@ def write_framelist(framelist_file: Path, animcache: Path, fps: float, framelist
             fn = animcache / Path(f"{frame:08d}.png")
             f.write(f"file '{fn}'\n")
             f.write(f"duration {time_per_frame_s}\n")
-            # print(f"file '{useframe:08d}.png'")
-            # print(f"duration {time_per_video_frame_s}")
 
 
 # ffmpeg -hide_banner -hwaccels
@@ -154,43 +159,114 @@ def write_framelist(framelist_file: Path, animcache: Path, fps: float, framelist
 #     "videotoolbox",
 # }
 
-# codecs = {
-#     "h264": {
-#         "args": {
-#             "all":
-#                 [
-#                     "-c:v", "libx264",
-#                     "-qp", "23",
-#                     "-vf", "format=yuv420p"
-#                 ],
-#         "valid_containers": {"mp4", "mov", "m4v", "mkv"}
-#     },
-#     "prores": {
-#         "args": [
 
-# }
+codecs: Dict[str, EncoderInfo] = {
+    "h264": EncoderInfo(
+        args_all=[
+            "-c:v", "libx264",
+            "-qp", "23",
+            "-vf", "format=yuv420p"
+        ],
+        args_alpha=None,
+        args_noalpha=[],
+        valid_containers={"mp4", "mov", "mkv"}
+    ),
+
+    "h264_nvenc": EncoderInfo(
+        args_all=[
+            "-c:v", "h264_nvenc",
+            "-qp", "23",
+            "-vf", "format=yuv420p"
+        ],
+        args_alpha=None,
+        args_noalpha=[],
+        valid_containers={"mp4", "mov", "mkv"}
+    ),
+
+    "prores": EncoderInfo(
+        args_all=[
+            "-c:v", "prores_ks",
+            "-quant_mat", "auto",
+            "-qscale:v", "9", "-vendor", "apl0",
+        ],
+        args_alpha=[
+            "-profile:v", "4",  # 4444
+            "-pix_fmt", "yuva444p10le",
+            "-alpha_bits", "8",
+        ],
+        args_noalpha=[
+            "-profile:v", "2",  # standard
+            "-pix_fmt", "yuv422p10le"
+        ],
+        valid_containers={"mov", }
+    ),
+
+    "webm": EncoderInfo(
+        args_all=[
+            "-c:v", "libvpx", "-auto-alt-ref", "0", "-crf", "30",
+            "-b:v", "10M",
+        ],
+        args_alpha=[
+            "-vf", "format=rgba",
+        ],
+        args_noalpha=[
+            "-vf", "format=rgb",
+        ],
+        valid_containers={"webm", }
+    ),
+}
 
 
-def render_video(outfile: Path, animcache: Path, fps: float, framelist: List[int]):
+def get_encode_codec(codec: str, extension: str, has_alpha: bool) -> List[str]:
+    if codec not in codecs:
+        raise KeyError(f"Invalid codec '{codec}' requested")
+
+    codec_info = codecs[codec]
+    extension = extension.lstrip(".")
+    if extension not in codec_info.valid_containers:
+        raise ValueError(f"Incompatible container '{extension}' rquested for codec '{codec}'")
+
+    codec_str = codec_info.args_all
+    if not has_alpha:
+        codec_str.extend(codec_info.args_noalpha)
+    else:
+        if codec_info.args_alpha is None:
+            raise ValueError(
+                f"video requires alpha transparency, which codec '{codec}' does not support")
+        else:
+            codec_str.extend(codec_info.args_alpha)
+
+    return codec_str
+
+
+def render_video(outfile: Path, codec: str, has_alpha: bool, animcache: Path, fps: float, framelist: List[int]):
+    log = lg.getLogger()
     timeout = 180  # FIXME: make configurable?
     framelist_file = outfile.with_suffix(outfile.suffix + ".framelist")
     write_framelist(framelist_file, animcache, fps, framelist)
 
-    # ffmpeg -f concat -safe 0 -i list.txt -r 60 -c:v h264_nvenc -cq:v 23 -vf "format=yuv420p" -y $BPM.mp4 && start $BPM.mp4
-    # FIXME: this should encode as prores w/ alpha (at least optionally)
+
+    codec_str = get_encode_codec(codec, outfile.suffix, has_alpha)
+
+    if log.isEnabledFor(lg.DEBUG):
+        log_level = "info"
+    else:
+        log_level = "warning"
+
     cmd: List[str] = [
-        "ffmpeg", "-hide_banner",
+        "ffmpeg", "-hide_banner", "-loglevel", log_level, "-stats",
         "-f", "concat", "-safe", "0",
         "-i", str(framelist_file),
         "-r", str(fps),
         "-an",
-        # "-c:v", "libx264", "-qp", "23", "-vf", "format=yuv420p",
-        # "-c:v", "prores_ks", "-profile:v", "4", "-quant_mat", "hq", "-pix_fmt", "yuva444p10le", "-alpha_bits", "8",
-        # part of vp8: "-crf", "30", "-b:v", "0"
-        "-vf", "format=rgba", "-c:v", "libvpx", "-auto-alt-ref", "0", "-crf", "30", "-b:v", "10M",
+        *codec_str,
         "-y",
         str(outfile)
     ]
+
+    log.debug(f"Attempting to encode with command: {cmd}")
+
+    print("Rendering...")
     try:
         subprocess.run(cmd, shell=False, stdin=subprocess.DEVNULL, check=True, timeout=timeout)
     except FileNotFoundError:
@@ -213,10 +289,67 @@ def render_video(outfile: Path, animcache: Path, fps: float, framelist: List[int
 
     framelist_file.unlink()
 
+
 def parse_arguments(argv: List[str]):
     parser = argparse.ArgumentParser(
         description="Generate an animation appropriate for a given bpm",
         allow_abbrev=True,
+    )
+
+    parser.add_argument(
+        "-b",
+        "--bpm",
+        type=float,
+        default=120,
+        help="bpm to which animation should be matched (default: 120)",
+    )
+
+    parser.add_argument(
+        "--cycles",
+        "-c",
+        type=int,
+        default=10,
+        help="number of animation cycles to render (default: 10)",
+    )
+
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=60.0,
+        help="fps of created output video (default: 60)",
+    )
+
+    parser.add_argument(
+        "-o",
+        "--outfile",
+        type=Path,
+        default=None,
+        action=CheckFile(extensions={'mp4', 'mov', 'webm'}),
+        help="output video file to generate (default: <animname>_<bpm>bpm.mov)",
+    )
+
+    parser.add_argument(
+        "--codec",
+        type=str,
+        default="prores",
+        choices=["h264", "h264_nvenc", "prores", "webm"],
+        help="encoder/codec to use for created video (default: prores)",
+    )
+
+    parser.add_argument(
+        "--animdir",
+        type=Path,
+        default=Path(__file__).parent / "anims",
+        action=CheckFile(must_exist=True),
+        help="directory in which to find animation data (default: 'anims/')",
+    )
+
+    parser.add_argument(
+        "--cachedir",
+        type=Path,
+        default=Path(__file__).parent / "cache",
+        action=CheckFile(must_exist=True),
+        help="directory in which to cache extracted animation data (default: 'cache/')",
     )
 
     parser.add_argument(
@@ -226,123 +359,48 @@ def parse_arguments(argv: List[str]):
         help="Enable debugging output",
     )
 
-    parser.add_argument(
-        "--animdir",
-        type=Path,
-        default=Path(__file__).parent / "anims",
-        action=CheckFile(must_exist=True),
-        help="directory in which to find animation data",
-    )
-
-    parser.add_argument(
-        "--cachedir",
-        type=Path,
-        default=Path(__file__).parent / "cache",
-        action=CheckFile(must_exist=True),
-        help="directory in which to cache extracted animation data",
-    )
-
-    parser.add_argument(
-        "-b",
-        "--bpm",
-        type=int,
-        default=120,
-        help="bpm to which animation should be matched",
-    )
-
-    parser.add_argument(
-        "--cycles",
-        "-c",
-        type=int,
-        default=10,
-        help="number of animation cycles to render",
-    )
-
-    parser.add_argument(
-        "--fps",
-        type=float,
-        default=60.0,
-        help="fps of created output video",
-    )
-
-    parser.add_argument(
-        "-o",
-        "--outfile",
-        type=Path,
-        default=None,
-        action=CheckFile(extensions={'mp4', 'mov', 'webm'}),
-        help="output .mov file to generate (defaults to <animname>_<bpm>bpm.mov)",
-    )
-
-    parser.add_argument(
-        "--encoder",
-        type=str,
-        default="x264",
-        choices=["x264", "nvenc", "prores", "vp8", "vp9"],
-        help="encoder to use for created video",
-    )
-
-    # parser.add_argument(
-    #     "--noninteractive",
-    #     default=True,
-    #     action='store_false',
-    #     dest="interactive",
-    #     help="don't show interactive graph (implies -w)",
-    # )
-
-    # parser.add_argument(
-    #     "--short",
-    #     "--no-short",
-    #     default=True,
-    #     action=NegateAction,
-    #     nargs=0,
-    #     help="generate plots for short (3s window) loudness (default: yes)",
-    # )
-
     # positional arguments
     parser.add_argument(
         "animation",
         type=str,
-        default="deerbutt",
-        nargs="?",
+        # default="deerbutt",
+        # nargs="?",
         help="animation name that should be rendered",
     )
 
     parsed_args = parser.parse_args(argv)
 
-    # make sure we enable writing the graph if the user specifies a filename
-    # if parsed_args.outfile:
-    #     parsed_args.write_graph = True
-
-    # if not parsed_args.interactive:
-    #     parsed_args.write_graph = True
-
-    # if parsed_args.write_graph and parsed_args.outfile is None:
-    #     parsed_args.outfile = parsed_args.file.with_suffix(".loudness.png")
     return parsed_args
 
 
 def main(argv: List[str]) -> int:
     args = parse_arguments(argv[1:])
     loglevel = "DEBUG" if args.debug else "INFO"
-    LOG_FORMAT = "[%(filename)s:%(lineno)s:%(funcName)s] (%(name)s) %(message)s"
+    # LOG_FORMAT = "[%(filename)s:%(lineno)s:%(funcName)s] (%(name)s) %(message)s"
+    LOG_FORMAT = "[%(filename)s:%(lineno)s:%(funcName)s] %(levelname)s: %(message)s"
     lg.basicConfig(level=loglevel, format=LOG_FORMAT)
 
     animname = args.animation
-    config = load_config(args.animation, args.animdir)
-    cache_anim(args.animation, args.animdir, args.cachedir)
-    framelist = gen_framelist(bpm=args.bpm, cycles=args.cycles,
-                              output_fps=args.fps, config=config)
+    animcache = args.cachedir / animname
 
     if args.outfile:
         outfile = args.outfile
     else:
-        outfile = Path(f"{animname}_{args.bpm}bpm.mov")
-    animcache = args.cachedir / animname
-    render_video(outfile=outfile, animcache=animcache,
-                 fps=args.fps, framelist=framelist)
+        if str(args.bpm).endswith(".0"):
+            bpm_str = str(int(args.bpm))
+        else:
+            bpm_str = str(args.bpm)
+        outfile = Path(f"{animname}_{bpm_str}bpm.mov")
 
-    # extract_anim(Path("anims/deerbutt.zip"), Path("anims/deerbutt"))
+    cache_anim(args.animation, args.animdir, args.cachedir)
+    config = load_config(args.animation, args.animdir)
+    framelist = gen_framelist(bpm=args.bpm, cycles=args.cycles,
+                              output_fps=args.fps, config=config)
+
+    render_video(outfile=outfile, codec=args.codec, has_alpha=config.has_alpha,
+                 animcache=animcache, fps=args.fps, framelist=framelist)
+
+    print(f"SUCCESS: rendered bpm-matched video to '{outfile}'")
     sys.exit(0)
 
 
