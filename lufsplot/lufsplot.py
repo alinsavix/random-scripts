@@ -480,8 +480,14 @@ class LUFSLoadAnimation:
 
         if summary["LRA low"] and summary["LRA high"]:
             lra = self._axs[0].axhspan(summary["LRA low"],
-                                       summary["LRA high"], color='g', alpha=.1)
+                                       summary["LRA high"], color='gainsboro', alpha=0.3)
             changed.append(lra)
+
+            range = summary["LRA high"] - summary["LRA low"]
+            rangestring = f"Final Loudness Range: {range:.1f} ({summary['LRA low']} to {summary['LRA high']})"
+            lra_text = self._axs[0].annotate(rangestring, (xloc + (X_PADDING * 0.75), summary["LRA low"]),
+                                             horizontalalignment='right', fontsize=14)
+            changed.append(lra_text)
 
         if summary["I"]:
             dot = self._axs[0].plot([xloc], summary["I"], label="_Integrated Final",
