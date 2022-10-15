@@ -185,6 +185,12 @@ class Loudness:
         if self._duration is not None:
             return self._duration
 
+
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
         try:
             output = subprocess.check_output(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -193,6 +199,7 @@ class Loudness:
                 stdin=subprocess.DEVNULL,
                 universal_newlines=True,
                 timeout=5,
+                startupinfo=startupinfo,
             )
 
         except FileNotFoundError:
@@ -222,6 +229,11 @@ class Loudness:
 
 
     def _ffmpeg_open_loudness(self) -> subprocess.Popen[str]:
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
         try:
             proc = subprocess.Popen(
                 ["ffmpeg", "-i", str(self._file), "-af",
@@ -231,6 +243,7 @@ class Loudness:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
+                startupinfo=startupinfo,
             )
 
         except FileNotFoundError:
