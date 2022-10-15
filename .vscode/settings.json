@@ -6,5 +6,7 @@
         "reportMissingTypeStubs": "none"
         // annoying because it makes .relative imports throw errors
         // "reportImportCycles": "none"
-    }
+    },
+    "python.analysis.inlayHints.variableTypes": false,
+    "python.analysis.inlayHints.functionReturnTypes": false
 }
