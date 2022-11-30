@@ -427,8 +427,10 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
             [], [], label="Integrated", color='b', linewidth=2)[0]
 
     if args.clipping:
+        ax1.axhline(y=-1.0, label="_TPK -1.0dB", color='red', linestyle='dotted', linewidth=0.75, alpha=1.0)
+        # ax1.axhline(y=-2.0, label="_TPK -1.0dB", color='orange', linestyle='dotted', linewidth=0.8, alpha=1.0)
         ax1_lines[Fields.FTPK] = ax1.plot(
-            [], [], label=f"Clipping ({args.clip_at}dB)", color='r', linewidth=3)[0]
+            [], [], label=f"Clipping ({args.clip_at}dB)", color='r', linewidth=2)[0]
 
     ax1.legend(loc='lower left', shadow=True, fontsize='large')
 
@@ -526,6 +528,12 @@ class LUFSLoadAnimation:
                 str(summary["LRA"]), (xloc, summary["LRA"] + 0.7), fontsize=16)
             changed.append(anno)
 
+        if self.args.clipping:
+            anno = self._axs[0].annotate(
+                str(f"TPK: {summary['Peak']:0.2f}"), (xloc, 0.0), fontsize=14, color='r')
+            changed.append(anno)
+        # print(summary)
+
         return changed
 
 
@@ -596,8 +604,10 @@ class LUFSLoadAnimation:
                 T, np.ma.masked_where(integrated <= -70.0, integrated))
 
         if self.args.clipping:
+            # self._lines[0][Fields.FTPK].set_data(
+            #     T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk.clip(0.0, 0.0)))
             self._lines[0][Fields.FTPK].set_data(
-                T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk.clip(0.0, 0.0)))
+                T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk))
 
         if self.args.lra:
             # Sometimes the beginning and end of a track have exceedingly large
@@ -875,7 +885,7 @@ def parse_arguments(argv: List[str]):
         "--no-clipping",
         default=True,
         action=NegateAction,
-        nargs=1,
+        nargs=0,
         help="show where true peak is higher than -1.0dbFS (default: yes)",
     )
 
