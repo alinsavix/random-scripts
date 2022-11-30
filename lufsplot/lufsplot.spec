@@ -41,4 +41,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon="lufsplot_icon.png",
+    version="file_version_info.txt",
 )
