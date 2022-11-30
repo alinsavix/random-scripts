@@ -427,7 +427,8 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
             [], [], label="Integrated", color='b', linewidth=2)[0]
 
     if args.clipping:
-        ax1.axhline(y=-1.0, label="_TPK -1.0dB", color='black', linestyle='dotted', linewidth=1, alpha=0.75)
+        ax1.axhline(y=args.clip_at, label=f"_TPK {args.clip_at}dB",
+                    color='black', linestyle='dotted', linewidth=1, alpha=0.75)
         # ax1.axhline(y=-2.0, label="_TPK -1.0dB", color='orange', linestyle='dotted', linewidth=0.8, alpha=1.0)
         ax1_lines[Fields.FTPK] = ax1.plot(
             [], [], label=f"Clipping ({args.clip_at}dB)", color='r', linewidth=2)[0]
@@ -606,9 +607,10 @@ class LUFSLoadAnimation:
 
         if self.args.clipping:
             # self._lines[0][Fields.FTPK].set_data(
-            #     T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk.clip(0.0, 0.0)))
+            #     T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk))
             self._lines[0][Fields.FTPK].set_data(
-                T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk))
+                T, np.ma.masked_where(ftpk < self.args.clip_at, self.args.clip_at - (ftpk)))
+
 
         if self.args.lra:
             # Sometimes the beginning and end of a track have exceedingly large
