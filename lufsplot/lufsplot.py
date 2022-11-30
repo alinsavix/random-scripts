@@ -22,6 +22,12 @@ from matplotlib.axes import Axes  # Just for typing
 from matplotlib.figure import Figure  # also also just for typing
 from matplotlib.lines import Line2D  # also just for typing
 
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    FFPROBE_BIN = os.path.join(sys._MEIPASS, "ffprobe")
+    FFMPEG_BIN = os.path.join(sys._MEIPASS, "ffmpeg")
+else:
+    FFPROBE_BIN = "ffprobe"
+    FFMPEG_BIN = "ffmpeg"
 # ffmpeg -i thing.mp4 -af ebur128=peak=true -f null -
 #
 # output (note: actual output is not linewrapped):
@@ -193,7 +199,7 @@ class Loudness:
 
         try:
             output = subprocess.check_output(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                [FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
                     "-of", "default=noprint_wrappers=1:nokey=1", str(self._file)],
                 shell=False,
                 stdin=subprocess.DEVNULL,
@@ -236,7 +242,7 @@ class Loudness:
 
         try:
             proc = subprocess.Popen(
-                ["ffmpeg", "-i", str(self._file), "-af",
+                [FFMPEG_BIN, "-i", str(self._file), "-af",
                  "ebur128=peak=true", "-f", "null", "-"],
                 shell=False,
                 stdin=subprocess.DEVNULL,
@@ -511,6 +517,15 @@ class LUFSLoadAnimation:
                 str(summary["I"]), (xloc, summary["I"] + 0.5), fontsize=18)
             changed.append(anno)
 
+        if self.args.lra and summary["LRA"]:
+            dot = self._axs[1].plot([xloc], summary["LRA"], label="_LRA Final",
+                        color='g', marker='o', markersize=7)[0]
+            changed.append(dot)
+
+            anno = self._axs[1].annotate(
+                str(summary["LRA"]), (xloc, summary["LRA"] + 0.7), fontsize=16)
+            changed.append(anno)
+
         return changed
 
 
@@ -590,7 +605,8 @@ class LUFSLoadAnimation:
             # so we'll remove the first 15 seconds and last 6 seconds before
             # plotting. This is absolutely not optimal at all, and better ideas
             # are vigorously accepted.
-            self._lines[1][Fields.LRA].set_data(T[150:-60], lra[150:-60].clip(None, 20.0))
+            # self._lines[1][Fields.LRA].set_data(T[150:-60], lra[150:-60].clip(None, 20.0))
+            self._lines[1][Fields.LRA].set_data(T[150:], lra[150:].clip(None, 20.0))
             self._axs[1].relim()
             self._axs[1].autoscale_view(scalex=False, scaley=True)
 
