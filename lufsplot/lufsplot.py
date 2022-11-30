@@ -427,7 +427,7 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
             [], [], label="Integrated", color='b', linewidth=2)[0]
 
     if args.clipping:
-        ax1.axhline(y=-1.0, label="_TPK -1.0dB", color='red', linestyle='dotted', linewidth=0.75, alpha=1.0)
+        ax1.axhline(y=-1.0, label="_TPK -1.0dB", color='black', linestyle='dotted', linewidth=1, alpha=0.75)
         # ax1.axhline(y=-2.0, label="_TPK -1.0dB", color='orange', linestyle='dotted', linewidth=0.8, alpha=1.0)
         ax1_lines[Fields.FTPK] = ax1.plot(
             [], [], label=f"Clipping ({args.clip_at}dB)", color='r', linewidth=2)[0]
@@ -528,9 +528,10 @@ class LUFSLoadAnimation:
                 str(summary["LRA"]), (xloc, summary["LRA"] + 0.7), fontsize=16)
             changed.append(anno)
 
-        if self.args.clipping:
+        if self.args.clipping and "Peak" in summary:
+            peak_color = "r" if summary["Peak"] > self.args.clip_at else None
             anno = self._axs[0].annotate(
-                str(f"TPK: {summary['Peak']:0.2f}"), (xloc, 0.0), fontsize=14, color='r')
+                str(f"TPK:\n{summary['Peak']:0.2f}"), (xloc, 0.0), fontsize=14, color=peak_color)
             changed.append(anno)
         # print(summary)
 
@@ -709,6 +710,7 @@ def gen_loudness(file: Path, title: str, args: argparse.Namespace) -> None:
 
 
 lufs_targets = {
+    "general": (-14.0, "General Integrated Target"),
     "amazon": (-11.0, "Amazon Integrated Target"),
     "apple": (-16.0, "Apple Music Integrated Target"),
     "beatport": (-8.0, "Beatport/DJ Stores Integrated Target"),
@@ -818,9 +820,9 @@ def parse_arguments(argv: List[str]):
 
     parser.add_argument(
         "--target",
-        default="youtube",
+        default="general",
         type=check_lufs_target,
-        help="target LUFS, or one of: amazon, apple, beatport, spotify, youtube (default: youtube)"
+        help="target LUFS, or one of: general, amazon, apple, beatport, spotify, youtube (default: youtube)"
     )
 
     parser.add_argument(
