@@ -21,6 +21,7 @@ from matplotlib.artist import Artist  # yet more just for typing
 from matplotlib.axes import Axes  # Just for typing
 from matplotlib.figure import Figure  # also also just for typing
 from matplotlib.lines import Line2D  # also just for typing
+from numpy.lib.stride_tricks import sliding_window_view
 
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     FFPROBE_BIN = os.path.join(sys._MEIPASS, "ffprobe")
@@ -107,6 +108,7 @@ class Fields(IntEnum):
     LRA = 5
     FTPK = 6
     TPK = 7
+    CLIP = 8
 
 
 # Convert seconds to [HH:]MM:SS
@@ -430,8 +432,13 @@ def prep_graph(fig: Figure, ax1: Axes, ax2: Optional[Axes], duration: float, tit
         ax1.axhline(y=args.clip_at, label=f"_TPK {args.clip_at}dB",
                     color='black', linestyle='dotted', linewidth=1, alpha=0.75)
         # ax1.axhline(y=-2.0, label="_TPK -1.0dB", color='orange', linestyle='dotted', linewidth=0.8, alpha=1.0)
-        ax1_lines[Fields.FTPK] = ax1.plot(
+        ax1_lines[Fields.CLIP] = ax1.plot(
             [], [], label=f"Clipping ({args.clip_at}dB)", color='r', linewidth=2)[0]
+
+    if args.peaks:
+        ax1_lines[Fields.FTPK] = ax1.plot(
+            [], [], label=f"True Peak", color='r', linewidth=0.8)[0]
+
 
     ax1.legend(loc='lower left', shadow=True, fontsize='large')
 
@@ -522,7 +529,7 @@ class LUFSLoadAnimation:
 
         if self.args.lra and summary["LRA"]:
             dot = self._axs[1].plot([xloc], summary["LRA"], label="_LRA Final",
-                        color='g', marker='o', markersize=7)[0]
+                                    color='g', marker='o', markersize=7)[0]
             changed.append(dot)
 
             anno = self._axs[1].annotate(
@@ -605,12 +612,38 @@ class LUFSLoadAnimation:
             self._lines[0][Fields.INTEGRATED].set_data(
                 T, np.ma.masked_where(integrated <= -70.0, integrated))
 
-        if self.args.clipping:
+        if self.args.peaks:
+            WINDOW = 3
+            padding = [np.nan for _ in range(WINDOW - 1)]
+
+            # self._lines[0][Fields.FTPK].set_data(
+            #     T, np.ma.masked_where(ftpk >= self.args.clip_at, ftpk))
+            # self._lines[0][Fields.FTPK].set_data(
+            #     T, ftpk)
+            # x = np.max(sliding_window_view(ftpk, window_shape=5), axis=1)
+            # padding = [np.nan * (WINDOW - 1)]
+            # print(len(x))
+            # print(len(padding))
+            # self._lines[0][Fields.FTPK].set_data(T, padding + x)
+            # print(f"T shape: {np.shape(T)}")
+            mmax = np.max(sliding_window_view(ftpk, window_shape=WINDOW), axis=1)
+            # print(f"x1 shape: {np.shape(x1)}")
+            # x2 = np.max(x1, axis=1)
+            # print(f"x2 shape: {np.shape(x2)}")
+            # padding.append(x2)
+            # print(f"padding shape: {np.shape(padding)}")
+            # sys.stdout.flush()
+            self._lines[0][Fields.FTPK].set_data(T,
+                                                 np.concatenate((padding, np.ma.masked_where(mmax >= self.args.clip_at, mmax))))
+
+            self._lines[0][Fields.CLIP].set_data(
+                T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk))
+
+        elif self.args.clipping:
             # self._lines[0][Fields.FTPK].set_data(
             #     T, np.ma.masked_where(ftpk < self.args.clip_at, ftpk))
-            self._lines[0][Fields.FTPK].set_data(
+            self._lines[0][Fields.CLIP].set_data(
                 T, np.ma.masked_where(ftpk < self.args.clip_at, self.args.clip_at - (ftpk)))
-
 
         if self.args.lra:
             # Sometimes the beginning and end of a track have exceedingly large
@@ -718,6 +751,8 @@ lufs_targets = {
     "beatport": (-8.0, "Beatport/DJ Stores Integrated Target"),
     "spotify": (-14.0, "Spotify Integrated Target"),
     "youtube": (-14.0, "YouTube Integrated Target"),
+
+
 }
 
 # returns the target string unchanged (it'll be used later) or raise a type error
@@ -842,13 +877,6 @@ def parse_arguments(argv: List[str]):
     )
 
     parser.add_argument(
-        "--clip-at",
-        default=-1.0,
-        type=float,
-        help="dB value above which is considered to be clipping (default: -1.0)",
-    )
-
-    parser.add_argument(
         "--momentary",
         "--no-momentary",
         default=False,
@@ -885,12 +913,28 @@ def parse_arguments(argv: List[str]):
     )
 
     parser.add_argument(
+        "--peaks",
+        "--no-peaks",
+        default=False,
+        action=NegateAction,
+        nargs=0,
+        help="generate plot for peak values",
+    )
+
+    parser.add_argument(
         "--clipping",
         "--no-clipping",
         default=True,
         action=NegateAction,
         nargs=0,
         help="show where true peak is higher than -1.0dbFS (default: yes)",
+    )
+
+    parser.add_argument(
+        "--clip-at",
+        default=-1.0,
+        type=float,
+        help="dB value above which is considered to be clipping (default: -1.0)",
     )
 
     # positional arguments
