@@ -20,6 +20,18 @@ counters = {
     "failure": 0,
 }
 
+# output and flush (unbuffered) without a newline
+def out(s: str) -> None:
+    print(s, end="")
+    sys.stdout.flush()
+
+
+# output and flush (unbuffered) with a newline
+def outl(s: str) -> None:
+    print(s)
+    sys.stdout.flush()
+
+
 def parse_bool(s: str):
     if not s or s.lower() == "false":
         return False
@@ -28,7 +40,7 @@ def parse_bool(s: str):
         return True
 
     # else we don't know what it is
-    print(f"WARNING: Unknown bool value {s}")
+    outl(f"WARNING: Unknown bool value {s}")
     return False
 
 
@@ -55,11 +67,11 @@ def create_media_source_from_cfg(ws: Any, scene: str, name: str, cfg: Dict[str, 
         requests.CreateInput(sceneName=scene, inputName=name,
                              inputKind="ffmpeg_source", sceneItemEnabled=False, inputSettings=cfg))
     if not res.status:
-        # print(f"WARING: failed to create media source '{name}'")
+        # outl(f"WARING: failed to create media source '{name}'")
         return None
 
     id = res.getSceneItemId()
-    # print(f"OK: Created media source '{name}' as id {id}")
+    # outl(f"OK: Created media source '{name}' as id {id}")
     return id
 
 
@@ -80,22 +92,22 @@ def create_alert(ws: Any, scene: str, name: str, file=Path, loop=False) -> Optio
     global counters
     src = media_source_by_name(ws, name)
     if src is not None:
-        print("EXISTS (not touching)")
+        outl("EXISTS (not touching)")
         counters["exists"] += 1
         return None
     else:
         if not file.exists():
-            print(f"FAILURE (missing video file '{file}')")
+            outl(f"FAILURE (missing video file '{file}')")
             counters["missing"] += 1
             return None
 
         newsrc = create_media_source_from_cfg(ws, scene, name, input_cfg)
         if newsrc is None:
-            print("FAILURE (unknown)")
+            outl("FAILURE (unknown)")
             counters["failure"] += 1
             return None
         else:
-            print(f"created with id {newsrc}")
+            outl(f"created with id {newsrc}")
             counters["ok"] += 1
             return newsrc
 
@@ -118,6 +130,11 @@ def set_monitor_only(ws: Any, source: str) -> bool:
     return res.status
 
 
+def set_volume(ws: Any, source: str, vol: float) -> None:
+    res = ws.call(requests.SetInputVolume(inputName=source, inputVolumeMul=vol))
+    return res.status
+
+
 def main():
     if getattr(sys, 'frozen', False):
         # os.chdir(sys._MEIPASS)
@@ -128,21 +145,21 @@ def main():
     ws = obsws("localhost", 4455, "secret")
     ws.connect()
     ver = ws.call(requests.GetVersion()).getObsVersion()
-    print(f"INFO: Connected to OBS, version {ver}")
+    outl(f"INFO: Connected to OBS, version {ver}")
 
     sceneidx = scene_by_name(ws, CHEERS_SCENE)
 
     if sceneidx is not None:
-        print(f"INFO: Found existing scene '{CHEERS_SCENE}' at index {sceneidx}, using that")
+        outl(f"INFO: Found existing scene '{CHEERS_SCENE}' at index {sceneidx}, using that")
     else:
-        print(f"INFO: Couldn't find a scene '{CHEERS_SCENE}', creating")
+        outl(f"INFO: Couldn't find a scene '{CHEERS_SCENE}', creating")
         x = ws.call(requests.CreateScene(sceneName=CHEERS_SCENE))
         if not x.status:
-            print(f"ERROR: Failed to create scene '{CHEERS_SCENE}'")
+            outl(f"ERROR: Failed to create scene '{CHEERS_SCENE}'")
             sys.exit(1)
 
 
-    print("CREATING SOURCES:")
+    outl("CREATING SOURCES:")
 
     with open("botconfig.csv", 'r') as f:
         reader = csv.DictReader(f)
@@ -151,7 +168,7 @@ def main():
                 continue
 
             # otherwise, create it
-            print(f"  {row['Source']}: ", end="")
+            out(f"  {row['Source']}: ")
             id = create_alert(ws, CHEERS_SCENE, row["Source"], Path(row["File"]), loop=parse_bool(row["Repeat"]))
 
             x_loc = int(row["X"]) if row["X"] else 0
@@ -173,10 +190,15 @@ def main():
 
             set_monitor_only(ws, row["Source"])
 
-    print("\nDONE!")
-    print(f"{counters['ok']} created, {counters['exists']} skipped (existing), {counters['missing']} missing video files, {counters['failure']} failures")
+            vol = float(row["Vol%"]) / 100 if row["Vol%"] else 1.0
+            set_volume(ws, row["Source"], vol)
 
-    print("Press any key to exit")
+
+
+    outl("\nDONE!")
+    outl(f"{counters['ok']} created, {counters['exists']} skipped (existing), {counters['missing']} missing video files, {counters['failure']} failures")
+
+    outl("Press any key to exit")
     msvcrt.getch()
 
     ws.disconnect()
@@ -186,8 +208,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"\n\n!!  ERROR: SCRIPT FAILED\n\nexception: {e}", file=sys.stderr)
-        print("\nPress any key to exit")
+        outl(f"\n\n!!  ERROR: SCRIPT FAILED\n\nexception: {e}")
+        outl("\nPress any key to exit")
         msvcrt.getch()
 
 
