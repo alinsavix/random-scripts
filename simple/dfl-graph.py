@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import re
+import numpy as np
 import matplotlib.pyplot as plt
 import sys
 from typing import Optional, Dict, List
@@ -7,6 +8,49 @@ from functools import partial
 from pathlib import Path
 from tdvutil.argparse import CheckFile
 import argparse
+
+# def moving_average(data, window):
+#     return np.convolve(data, np.ones(window), 'valid') / window
+
+def moving_avg_dev_slope(data, window):
+    padding = (window - 1) // 2
+
+    avg = np.convolve(data, np.ones(window), 'valid') / window
+    padded_avg = np.pad(avg, (padding, padding), mode='edge')
+
+    stddev = np.sqrt(np.convolve(np.square(data - padded_avg), np.ones(window), 'valid') / window)
+    padded_stddev = np.pad(stddev, (padding, padding), mode='edge')
+
+    seq = np.arange(0, len(padded_avg))
+    slope = np.diff(padded_avg) / np.diff(seq)
+    padded_slope = np.pad(slope, (1, 0), mode='edge')
+
+    # seq = np.arange(0, len(data))
+    # slope = np.diff(data) / np.diff(seq)
+    # padded_slope = np.pad(slope, (1, 0), mode='edge')
+
+    # print (len(padded_avg))
+    # print (len(padded_stddev))
+    # print (len(padded_slope))
+
+    return padded_avg, padded_stddev, padded_slope
+
+
+def moving_regression(data, window):
+    npdata = np.array(data)
+    data_roll = np.lib.stride_tricks.as_strided(npdata, shape=(len(npdata) - window + 1, window), strides=(npdata.strides[0], npdata.strides[0]))
+    data_mean = data_roll.mean(axis=1, keepdims=True)
+    y = np.arange(window).reshape(-1, 1)
+    beta = np.linalg.lstsq(y, data_roll.T - data_mean.T, rcond=None)[0].T
+    z = beta[:, 0]
+
+    padding = (window - 1) // 2
+    extra_padding = (window - 1) % 2
+    padded_beta = np.pad(z, (padding, padding + extra_padding), mode='edge')
+
+    return padded_beta
+
+
 
 def check_val(val: str) -> bool:
     # print(val)
@@ -25,6 +69,7 @@ def check_val(val: str) -> bool:
         return True
 
     return False
+
 
 def is_enabled(val: str, if_true: Optional[str] = None, if_false: Optional[str] = None) -> Optional[str]:
     # if the thing we're checking is true
@@ -64,6 +109,7 @@ def norm_config(conf: str, val: str) -> Optional[str]:
 
     f = configthings[conf]
     return f(val)
+
 
 def build_config_str(config: Dict[str, str]) -> str:
     # print(config)
@@ -248,6 +294,7 @@ def main(argv: List[str]) -> int:
     # Initialize dictionaries to store the data for each combination of configuration variables
     source_losses_dict = {}
     dest_losses_dict = {}
+    iteration_times_dict = {}
     iteration_nums_dict = {}
 
     # Split the text into sections based on the header
@@ -297,7 +344,6 @@ def main(argv: List[str]) -> int:
         \[
             (?P<dst_loss> \d+\.\d+)
         \]
-        $
         """, re.VERBOSE)
         # Extract the loss values for each timestamp
 
@@ -315,10 +361,11 @@ def main(argv: List[str]) -> int:
                 # print(fields)
                 timestamp = m.group("timestamp")
                 iteration = int(m.group("iteration"))
+                iteration_time = int(m.group("iter_time"))
                 source_loss = float(m.group("src_loss"))
                 dest_loss = float(m.group("dst_loss"))
 
-                losses[iteration] = (source_loss, dest_loss)
+                losses[iteration] = (source_loss, dest_loss, iteration_time)
                 # if timestamp not in losses:
                 #     losses[timestamp] = []
                 # losses[timestamp].append((source_loss, dest_loss))
@@ -331,10 +378,12 @@ def main(argv: List[str]) -> int:
             # print("created new list")
             source_losses_dict[cfg_str] = []
             dest_losses_dict[cfg_str] = []
+            iteration_times_dict[cfg_str] = []
             iteration_nums_dict[cfg_str] = []
 
         source_losses_dict[cfg_str].extend([v[0] for v in losses.values()])
         dest_losses_dict[cfg_str].extend([v[1] for v in losses.values()])
+        iteration_times_dict[cfg_str].extend([v[2] for v in losses.values()])
         iteration_nums_dict[cfg_str].extend(losses.keys())
 
         # print(f"after: {source_losses_dict.keys()}")
@@ -350,29 +399,56 @@ def main(argv: List[str]) -> int:
         #     dest_losses_dict[cfg_str].extend(dest_losses)
 
 
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 8))
-    fig.subplots_adjust(hspace=0.4)
+    fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(5, 1, figsize=(20, 10))
+    fig.subplots_adjust(hspace=0.6)
     ax1.set_title("Source Loss")
     ax2.set_title("Dest Loss")
+    ax3.set_title("Slopes")
+    ax4.set_title("Iteration Time (ms)")
 
-    # ax3.set_title("legend")
-    ax3.axis("off")
 
+    # ax4.set_title("legend")
+    ax5.axis("off")
+    ax5.legend(loc='center left')
 
     # Create the plot
     # print(source_losses_dict)
+    WINDOW = 15
     for config_str in source_losses_dict:
+        if len(source_losses_dict[config_str]) == 0:
+            continue
         print(config_str)
-        ax1.plot(
-            iteration_nums_dict[config_str], source_losses_dict[config_str], label=config_str + ' source loss')
-        ax2.plot(iteration_nums_dict[config_str], dest_losses_dict[config_str],
-                label=config_str + ' destination loss')
-        ax3.plot([], [], label=config_str + " loss")
+        # padding = [np.nan for _ in range(WINDOW - 1)]
+
+        src_mavg, src_mdev, src_slope = moving_avg_dev_slope(source_losses_dict[config_str], WINDOW)
+        # mavg = moving_average(source_losses_dict[config_str], WINDOW)
+        # mdev = moving_stddev(source_losses_dict[config_str], WINDOW)
+
+        # ax1.plot(iteration_nums_dict[config_str], src_slope, label=config_str + ' source slope')
+        ax1.plot(iteration_nums_dict[config_str], src_mavg, label=config_str + ' source loss')
+        # ax3.plot(iteration_nums_dict[config_str], src_slope, label=config_str + ' src slope')
+
+        # src_slope = moving_regression(source_losses_dict[config_str], 500)
+        # ax3.plot(iteration_nums_dict[config_str], src_slope, label=config_str + ' src slope')
+
+
+        # ax1.plot(iteration_nums_dict[config_str], mdev, label=config_str + ' source loss deviation')
+        # ax1.fill_between(iteration_nums_dict[config_str], src_mavg - src_mdev, src_mavg + src_mdev, alpha=0.5)
+        dst_mavg, dst_mdev, dst_slope = moving_avg_dev_slope(dest_losses_dict[config_str], WINDOW)
+        ax2.plot(iteration_nums_dict[config_str], dst_mavg, label=config_str + ' destination loss')
+        # ax3.plot(iteration_nums_dict[config_str], dst_slope, label=config_str + ' dst slope')
+
+        # dst_slope = moving_regression(dest_losses_dict[config_str], 500)
+        # ax3.plot(iteration_nums_dict[config_str], dst_slope, label=config_str + ' src slope')
+
+        time_mavg, time_mdev, time_slope = moving_avg_dev_slope(iteration_times_dict[config_str], WINDOW)
+        ax4.plot(iteration_nums_dict[config_str], time_mavg, label=config_str + ' iteration time')
+
+        ax5.plot([], [], label=config_str + " loss")
     # plt.title('Losses over time for all configurations')
     plt.xlabel('Iterations')
     plt.ylabel('Loss')
     # plt.legend()
-    ax3.legend(loc='center left')
     plt.show()
 
 
