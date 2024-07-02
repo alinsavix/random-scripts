@@ -52,7 +52,7 @@ def remux(source: Path, dest: Path, args: argparse.Namespace):
     print(f"\nDONE: completed remux to {dest}")
 
 
-valid_extensions = {"mkv", "mp4", "mov", "m4v", "mpg", "avi", "webm"}
+valid_extensions = {"mkv", "mp4", "mov", "m4v", "mpg", "avi", "flv", "webm"}
 
 def parse_arguments(argv: List[str]):
     parser = argparse.ArgumentParser(
