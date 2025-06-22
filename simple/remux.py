@@ -11,7 +11,7 @@ from typing import List
 from tdvutil.argparse import CheckFile, NegateAction
 
 
-def remux(source: Path, dest: Path, args: argparse.Namespace):
+def remux(source: Path, dest: Path, args: argparse.Namespace) -> None:
     fh, _tmpfile = tempfile.mkstemp(suffix=dest.suffix, prefix="remux_", dir=dest.parent)
     os.close(fh)
 
@@ -20,7 +20,7 @@ def remux(source: Path, dest: Path, args: argparse.Namespace):
         print(f"DEBUG: tmpfile is {tmpfile}", file=sys.stderr)
 
     try:
-        subprocess.run(["ffmpeg", "-hide_banner", "-i", source, "-c", "copy", "-y", tmpfile],
+        subprocess.run(["ffmpeg", "-hide_banner", "-i", source, "-c", "copy", "-map", "0", "-y", tmpfile],
                        shell=False, stdin=subprocess.DEVNULL, check=True, timeout=args.timeout)
     except FileNotFoundError:
         print("ERROR: couldn't execute ffmpeg, please make sure it exists in your PATH")
@@ -54,10 +54,10 @@ def remux(source: Path, dest: Path, args: argparse.Namespace):
 
 valid_extensions = {"mkv", "mp4", "mov", "m4v", "mpg", "avi", "flv", "webm"}
 
-def parse_arguments(argv: List[str]):
+def parse_arguments(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog='remux.py',
-        description='Remux a video file with ffmpeg',
+        description='Remux video files with ffmpeg',
     )
 
     parser.add_argument(
@@ -74,7 +74,7 @@ def parse_arguments(argv: List[str]):
         default=None,
         type=Path,
         action=CheckFile(extensions=valid_extensions, must_exist=False),
-        help="output file to write (defaults to <basename>.mp4",
+        help="output directory for remuxed files (defaults to same directory as input files)",
     )
 
     parser.add_argument(
@@ -84,7 +84,7 @@ def parse_arguments(argv: List[str]):
         default=True,
         action=NegateAction,
         nargs=0,
-        help="delete original file after remuxing"
+        help="delete original files after remuxing"
     )
 
     parser.add_argument(
@@ -95,30 +95,44 @@ def parse_arguments(argv: List[str]):
     )
 
     parser.add_argument(
-        "file",
+        "files",
         type=Path,
-        action=CheckFile(extensions=valid_extensions, must_exist=True),
+        nargs="+",
+        # action=CheckFile(extensions=valid_extensions, must_exist=True),
         help="video file(s) to remux",
     )
 
     parsed_args = parser.parse_args(argv[1:])
 
-    if parsed_args.out is None:
-        parsed_args.out = parsed_args.file.with_suffix(".mp4")
+    if parsed_args.out is not None:
+        # If -o is specified, ensure it's a directory
+        if not parsed_args.out.exists():
+            parsed_args.out.mkdir(parents=True)
+        elif not parsed_args.out.is_dir():
+            parser.error("Output path must be a directory when processing multiple files")
 
     return parsed_args
 
 
 def main(argv: List[str]) -> int:
     args = parse_arguments(argv)
-    # loglevel = "DEBUG" if args.debug else "INFO"
-    # loglevel = "INFO"
-    # LOG_FORMAT = "[%(filename)s:%(lineno)s:%(funcName)s] (%(name)s) %(message)s"
-    # lg.basicConfig(level=loglevel, format=LOG_FORMAT)
 
-    # log = lg.getLogger()
+    for source_file in args.files:
+        if args.out is not None:
+            # If output directory is specified, place file there with .mp4 extension
+            out_file = args.out / source_file.with_suffix(".mp4").name
+        else:
+            # Otherwise, place in same directory as source with .mp4 extension
+            out_file = source_file.with_suffix(".mp4")
 
-    remux(args.file, args.out, args)
+        if args.debug:
+            print(f"\nDEBUG: Processing {source_file} -> {out_file}")
+
+        try:
+            remux(source_file, out_file, args)
+        except Exception as e:
+            print(f"ERROR: Failed to process {source_file}: {str(e)}", file=sys.stderr)
+            continue
 
     return 0
 
