@@ -181,7 +181,16 @@ EOF
             # and finally try to match a branch name.
             for worktree_name in "${worktrees[@]}"; do
                 target=""
-                if [ -d "$wtroot/$worktree_name" ]; then
+
+                # If '.' is specified, use the current worktree
+                if [ "$worktree_name" = "." ]; then
+                    target="$(git rev-parse --show-toplevel 2>/dev/null)"
+                    if [ -z "$target" ]; then
+                        echo "wt: '.' specified but not currently in a worktree" >&2
+                        exit_code=1
+                        continue
+                    fi
+                elif [ -d "$wtroot/$worktree_name" ]; then
                     target="$wtroot/$worktree_name"
                 elif [ -d "$worktree_name" ]; then
                     target="$worktree_name"
@@ -205,7 +214,7 @@ EOF
                     local main_wt
                     main_wt="$(git worktree list --porcelain | awk '$1=="worktree"{print $2; exit}')"
                     if [ -z "$main_wt" ] || [ "$main_wt" = "$abs_target" ]; then
-                        echo "wt: cannot escape from '$worktree_name' before removing it" >&2
+                        echo "wt: cannot escape from '$worktree_name' before removing, doing nothing" >&2
                         exit_code=1
                         continue
                     fi
