@@ -57,6 +57,37 @@ _wt_create_and_cd() {
     cd "$target"
 }
 
+# _wt_list_pretty <toplevel> [long]
+# Without "long": prints path and hash only.
+# With "long":    also prints branch name.
+_wt_list_pretty() {
+    local tl="$1" mode="${2:-short}"
+    git worktree list --porcelain | awk -v tl="$tl" -v mode="$mode" '
+        BEGIN { n=-1 }
+        /^worktree / {
+            n++
+            paths[n]=$2
+            hashes[n]=""
+            branches[n]="(detached)"
+            prefix=tl "/"
+            if (substr(paths[n],1,length(prefix))==prefix)
+                paths[n]="./" substr(paths[n],length(prefix)+1)
+        }
+        /^HEAD /    { hashes[n]=substr($2,1,7) }
+        /^branch /  { b=$2; sub(/^refs\/heads\//,"",b); branches[n]=b }
+        END {
+            maxw=0
+            for (i=0;i<=n;i++) if (length(paths[i])>maxw) maxw=length(paths[i])
+            for (i=0;i<=n;i++) {
+                if (mode=="long")
+                    printf "%-*s  %s  [%s]\n", maxw, paths[i], hashes[i], branches[i]
+                else
+                    printf "%-*s  %s\n", maxw, paths[i], hashes[i]
+            }
+        }
+    '
+}
+
 _wt_list_branches() {
     git worktree list --porcelain \
         | awk '
@@ -106,7 +137,8 @@ Usage: wt [OPTIONS] [name]
 
 Options:
   -h, --help                Show this help message
-  -l, --list                List all worktrees
+  -l, --list                List all worktrees (path and hash)
+  -L                        List all worktrees (path, hash, and branch)
   -b, --branch <name>       Create new branch and worktree at .worktrees/<name>
   -c, --create <name>       Create worktree from existing branch at .worktrees/<name>
   -r, --remove [--force] <name>...
@@ -125,18 +157,33 @@ EOF
         "")
             if command -v fzf >/dev/null 2>&1; then
                 target="$(git worktree list --porcelain \
-                    | awk '$1=="worktree"{print $2}' \
+                    | awk -v tl="$toplevel" '
+                        $1=="worktree"{
+                            p=$2
+                            prefix=tl "/"
+                            if (substr(p,1,length(prefix))==prefix)
+                                p="./" substr(p,length(prefix)+1)
+                            print p
+                        }' \
                     | fzf --height 40% --reverse)"
-                [ -n "$target" ] && cd "$target"
+                if [ -n "$target" ]; then
+                    [[ "$target" == "./"* ]] && target="$toplevel/${target#./}"
+                    cd "$target" || return $?
+                fi
                 return $?
             fi
-            git worktree list
+            _wt_list_pretty "$toplevel"
             echo "Tip: install fzf for interactive selection." >&2
             return 0
             ;;
 
         -l|--list)
-            git worktree list
+            _wt_list_pretty "$toplevel" short
+            return 0
+            ;;
+
+        -L)
+            _wt_list_pretty "$toplevel" long
             return 0
             ;;
 
