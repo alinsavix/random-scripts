@@ -71,7 +71,7 @@ _wt_list_pretty() {
             branches[n]="(detached)"
             prefix=tl "/"
             if (substr(paths[n],1,length(prefix))==prefix)
-                paths[n]="./" substr(paths[n],length(prefix)+1)
+                paths[n]=substr(paths[n],length(prefix)+1)
         }
         /^HEAD /    { hashes[n]=substr($2,1,7) }
         /^branch /  { b=$2; sub(/^refs\/heads\//,"",b); branches[n]=b }
@@ -162,12 +162,12 @@ EOF
                             p=$2
                             prefix=tl "/"
                             if (substr(p,1,length(prefix))==prefix)
-                                p="./" substr(p,length(prefix)+1)
+                                p=substr(p,length(prefix)+1)
                             print p
                         }' \
                     | fzf --height 40% --reverse)"
                 if [ -n "$target" ]; then
-                    [[ "$target" == "./"* ]] && target="$toplevel/${target#./}"
+                    [[ "$target" != /* ]] && target="$toplevel/$target"
                     cd "$target" || return $?
                 fi
                 return $?
@@ -280,6 +280,22 @@ EOF
     esac
 
     # handle "wt <name>"
+
+    # try paths as shown by "wt -l": relative paths are relative to toplevel
+    if [[ "$cmd" != /* && "$cmd" == */* ]]; then
+        local resolved="$toplevel/$cmd"
+        if [ -d "$resolved" ]; then
+            cd "$resolved" || return $?
+            return 0
+        fi
+    fi
+
+    # try the argument as a direct path (absolute or relative to cwd)
+    if [ -d "$cmd" ]; then
+        cd "$cmd" || return $?
+        return 0
+    fi
+
     # try .worktrees/<name>
     if [ -d "$wtroot/$cmd" ]; then
         cd "$wtroot/$cmd"
